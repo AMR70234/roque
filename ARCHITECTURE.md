@@ -1,138 +1,199 @@
-# Roque — Architecture & Build Plan
+# Roque Architecture
 
-> An agent-native DEX. Trade by clicking, or by talking: *"Buy ETH if it drops below $2,500,"* *"you can trade ETH for me, max $500/trade, expires tomorrow."*
-> The point is not "AI can swap tokens." It is: **users safely delegate bounded financial capabilities to an agent, and those bounds are enforced independently of the agent's intelligence.**
+Roque is an agent-native exchange running against Ethereum Sepolia. Natural
+language is used to describe a trade, but language-model output never has
+authority over funds. GenLayer interprets the request; deterministic Solidity
+contracts validate and execute it.
 
-Status: greenfield. This document is the confirmed design; nothing is built yet.
+## System Invariant
 
----
-
-## 1. The one invariant everything serves
-
-```
-AI can propose, reason, request, coordinate.
+```text
+AI can propose, reason, request, and coordinate.
 AI cannot bypass deterministic authorization.
 ```
 
-The LLM is never the authority over funds. It proposes a **structured intent**; deterministic Ethereum contracts decide whether that intent is permitted. Compromise of the agent, the relayer, the keeper, or Latch must never move funds beyond what the user cryptographically pre-authorized on-chain.
+## Repository Structure
 
----
-
-## 2. Three layers, three concerns
-
-| Concern | Question | Owner |
-|---|---|---|
-| **Intelligence** | "What does the user want?" | GenLayer Intelligent Contract (judgment layer) |
-| **Authorization** | "What is this agent allowed to do?" | On-chain capability registry (Sepolia) + Latch (off-chain creds) |
-| **Execution** | "Is this transaction actually valid?" | Sepolia Solidity contracts (financial source of truth) |
-
-```
-                              USER
-                                │
-                ┌───────────────┴────────────────┐
-                ▼                                 ▼
-        Traditional DEX UI                  Agent Chat UI
-                │                                 │
-     user signs directly                         ▼
-     (own wallet, Sepolia)             GenLayer IC  ── JUDGMENT ONLY, holds no funds
-                │                       NL → structured intent
-                │                       reasoning-based conditions
-                │                                 │  finalized intent
-                │                                 ▼
-                │                          Off-chain RELAYER  ◄── governed by ──┐
-                │                          (holds agentSigner key)              │
-                │                                 │                         ┌───┴───┐
-                │                                 ▼                         │ LATCH │
-                └────────────────┬────────────────┘                        └───────┘
-                                 ▼                              key custody · spend cap ·
-                        Ethereum Sepolia                        API/RPC creds · allowlist · audit
-                        ┌────────┴─────────┐
-                        ▼                  ▼
-             AgentExecutor + Capability   DEXRouter → AMM Pools / Order Book
-             (deterministic enforcement)  ERC-20 test tokens · Chainlink feeds
+```text
+contracts/             Solidity financial contracts, deployment script, tests
+packages/shared/       ABIs, deployment registry, token/pool metadata, EIP-712 types
+packages/core/         Shared backend/domain logic used by Next and the relayer
+packages/genlayer/     Python GenLayer intelligent contract and tests
+apps/web/              Next.js UI and serverless API routes
+apps/relayer/          Fastify API wrapper plus keeper/indexer workers
 ```
 
-**Why GenLayer at all** (vs. a plain LLM call): interpretation is run by multiple validators reaching consensus via the equivalence principle — decentralized, trust-minimized judgment — and the reasoning is auditable. It is used *only* where judgment adds value; anything involving money is deterministic on Sepolia.
+The web serverless routes and the standalone relayer both call
+`@roque/core`. This keeps authentication, intent handling, quoting, execution,
+indexing, and database behavior consistent across deployments.
 
-**Why the off-chain relayer is unavoidable:** a GenLayer IC cannot natively send a transaction to Sepolia, and cannot produce a signature Sepolia can verify (no IC private key; output is non-deterministic across validators). Cross-chain is read-only via `gl.nondet.web` RPC. So a GenLayer decision reaches Sepolia only through an off-chain relayer that reads finalized GenLayer state and signs the Sepolia tx itself. The relayer is **untrusted** — on-chain caps bound it.
+## On-Chain Layer
 
----
+### Tokens and Pools
 
-## 3. The two-signature delegation model
+The Sepolia deployment contains ten faucet-backed ERC-20 test tokens:
 
-GenLayer never signs for Ethereum, so the trust root is the **user's own wallet**.
+```text
+rUSDC  rUSDT  rDAI  rWETH  rWBTC
+rLINK  rSNX   rFORTH rEURC rPAXG
+```
 
-1. **User capability grant (EIP-712, signed once):** designates an `agentSigner`, permitted actions, allowed tokens, `maxPerTrade`, `maxDailyVolume`, `maxSlippage`, `validUntil`, nonce. Recorded on-chain via `AgentExecutor.grantCapability(...)` (emits `AgentAuthorized`).
-2. **Per-action authorization (EIP-712, signed by the relayer's `agentSigner`):** the specific intent the relayer submits.
+`Deploy.s.sol` deploys one `LiquidityPool` for every unordered token pair,
+giving 45 direct pools. Pools use constant-product pricing with a 30 bps fee,
+LP shares, and deterministic reserve accounting. Pools are seeded at the
+Chainlink-derived token prices recorded during deployment.
 
-`AgentExecutor` verifies **both** signatures, then re-checks every bound deterministically (action allowed? token allowed? amount ≤ cap? daily volume ≤ cap? slippage ≤ policy? nonce unused? not expired? not revoked?) before calling the DEX. Only whitelisted typed operations exist (`executeSwap`, `createLimitOrder`, `cancelLimitOrder`) — **never** `execute(target, arbitraryData)`.
+`DEXRouter` is intentionally thin. It registers pools, quotes a pair, and
+executes exact-input swaps with a deadline and `minAmountOut` slippage floor.
+It does not route through multi-hop paths because every supported pair has a
+direct pool.
 
-**Copilot mode** needs none of this: the agent fills the form, the user signs the swap with their own wallet like a normal DEX. Delegation crypto is required only for **autonomous mode**.
+### OrderBook
 
----
+`OrderBook` escrows input tokens and stores owner, pair, amount, output floor,
+trigger price, direction, expiry, and status. Anyone may call
+`executeOrder`, but the contract reads the deployed Chainlink ETH/USD feed and
+rechecks the trigger and freshness before filling through the router. The
+keeper only supplies liveness; it cannot force an untriggered fill.
 
-## 4. Components
+Orders created directly by a user are owned and cancelled by that user.
+Agent-created orders are also owned by the user, while `AgentExecutor` is
+authorized only to create them.
 
-### 4.1 Ethereum Sepolia (Solidity, Foundry)
-- **Test tokens** — mintable ERC-20 `USDC` (6dp), `WETH` (18dp), public `faucet()`.
-- **LiquidityPool** — constant-product AMM (`x*y=k`), LP shares, `addLiquidity` / `removeLiquidity` / `swap`, fee in bps. Deterministic; no AI.
-- **DEXRouter** — `swapExactTokensForTokens`, `quoteSwap`, `swapForAgent` (only callable by AgentExecutor); slippage (`minAmountOut`), deadline, routing, fees.
-- **OrderBook** — limit orders as on-chain state (owner, pair, amountIn, minOut, triggerPrice, expiry, nonce, status). `executeLimitOrder(orderId)` callable by anyone (keeper); contract checks the trigger against a **Chainlink Sepolia price feed** deterministically → a malicious keeper cannot execute an untriggered order.
-- **AgentExecutor + CapabilityRegistry** — grant/revoke, the 10-point validation of §3, per-user **agent vault** (funds the agent may touch, isolated from the user's main wallet), daily-volume accounting, nonces. Emits the full agent event set.
+### AgentExecutor
 
-### 4.2 GenLayer (Python Intelligent Contract, judgment layer)
-- `interpret(text)` → structured intent via `gl.eq_principle.prompt_comparative` (nondet, isolated in a named function per the lint taint rule). Asks for clarification when a financially-material parameter is genuinely ambiguous (never silently guesses).
-- Reasoning-based condition adjudication for fuzzy mandates. Simple price triggers stay on Sepolia/Chainlink.
-- Reads Sepolia state (prices/balances/positions) via `gl.nondet.web.post` `eth_call`, block-pinned for consensus stability.
-- **Holds no funds. Its output is advisory until the on-chain re-check passes.**
+Autonomous funds are isolated in per-user token vaults. A capability grant
+records the agent signer, per-trade USD cap, UTC-day USD cap, slippage cap,
+expiry, and revocation state.
 
-### 4.3 Off-chain (Node) — relayer + keeper
-- **Relayer:** watches finalized GenLayer intents, builds + `agentSigner`-signs the Sepolia tx, submits to AgentExecutor. Untrusted.
-- **Keeper:** polls order triggers, calls `executeLimitOrder`. No special authority.
-- **Neon (Postgres):** activity log / indexer for the agent-activity view and portfolio reads.
+The user may submit the grant directly or sign an EIP-712 grant that the
+relayer submits. Each autonomous swap or limit order then requires a separate
+EIP-712 signature from the configured agent signer.
 
-### 4.4 Latch (Rialo, off-chain governance — Phase 4)
-Governs the relayer + keeper only: custodies the relayer signing key (TEE secp256k1 signer + allowlist), governs price-API/RPC credentials, spend ceiling, rate limits, audit receipts. **Never an on-chain authority** — the independent second boundary of the dual-layer model. (Private beta; software-proxy path for MVP; confirm access early.)
+Before moving tokens, `AgentExecutor` checks:
 
-### 4.5 Frontend (Next.js, Arbiter quality bar)
-- **Privy in external-wallet-only mode** — MetaMask / WalletConnect to Sepolia. No email/embedded wallets.
-- Traditional DEX (Swap / Limit / Liquidity / Portfolio / Orders) + Agent chat with **structured transaction previews** ([Approve]/[Reject]) and an autonomous-permission panel.
-- Real icon pack, custom logo + favicon tied to the concept, light/dark toggle, clean motion. Not vibecoded.
+- nonzero amount and unexpired intent;
+- both tokens registered;
+- existing, live, non-revoked capability;
+- recovered signer matches the capability;
+- nonce has not been used;
+- Chainlink-valued input is within the per-trade and UTC-day caps;
+- vault has enough input;
+- swaps satisfy the capability's slippage floor.
 
----
+The executor exposes typed operations only: vault deposit/withdraw,
+`executeSwap`, and `createLimitOrder`. There is no arbitrary target/calldata
+execution entrypoint.
 
-## 5. Worked flows
+### FaucetRouter
 
-**Instant swap (copilot):** user types *"swap 200 USDC for ETH"* → GenLayer `interpret` → SWAP intent → frontend preview → **user signs with own wallet** → DEXRouter swaps → event → UI updates. *(No relayer, no capability, no agent key.)*
+`TestToken` exposes a bounded faucet and owner-only minting. `FaucetRouter`
+calls every token faucet with isolated failure handling, allowing a wallet to
+claim the available portion of the ten-token set in one transaction.
 
-**Autonomous limit order:** user grants a capability (EIP-712) → types *"buy $1,000 of ETH if it drops below $2,500 within 48h"* → GenLayer interprets (clarifies "max $1,000 spend vs. 1,000 USDC worth" if ambiguous) → relayer signs + submits `createLimitOrder` → AgentExecutor validates capability + records order → keeper watches Chainlink → on trigger, `executeLimitOrder` validates the condition on-chain → swap → events → activity log.
+## GenLayer Interpretation
 
----
+`packages/genlayer/contracts/roque_interpreter.py` is the judgment layer. Its
+public interpretation method sends the user's text through
+`prompt_comparative`, then deterministically normalizes the response:
 
-## 6. Failure scenarios (must survive by design)
-- **Agent/LLM compromised or hallucinating** → intent re-validated on-chain; anything over caps/allowlist REJECTED.
-- **Relayer compromised** → can only act within the user's signed capability; arbitrary calldata has no entrypoint.
-- **Latch compromised** → off-chain access only; on-chain caps still bind.
-- **GenLayer unavailable** → traditional DEX UI keeps working; only the agent chat degrades.
+- token aliases map to the ten canonical symbols;
+- swaps and limit orders are distinguished;
+- amounts, percentages, trigger direction, and expiry are normalized;
+- unknown/self trades, invalid amounts, percentages above 100, exact-output
+  requests, and unsupported limit conditions are rejected.
 
----
+The interpreter holds no Sepolia funds and cannot directly submit a Sepolia
+transaction. Its result is advisory until the backend and contracts validate
+it again. GenLayer deployment metadata is in
+`packages/genlayer/deployment.json`.
 
-## 7. Phase plan (hackathon, full-vision scope)
+## Backend and Persistence
 
-| Phase | Deliverable | Gate |
-|---|---|---|
-| **P1** | Solidity DEX on Sepolia: tokens+faucet, AMM pool, router, order book+keeper, Chainlink triggers. Foundry tests green, deployed, verified. | A human can swap / LP / place a limit order via cast or a minimal UI. |
-| **P2** | GenLayer IC (`interpret` + Sepolia reads), genlayer-js wiring, chat UI, **copilot mode** (user signs). Lint + gltest green. | "Swap 200 USDC for ETH" → preview → user-signed swap end-to-end. |
-| **P3** | AgentExecutor + CapabilityRegistry + agent vault + EIP-712 two-sig, relayer, **autonomous mode**. | Granted capability → agent executes a bounded swap; over-cap attempt REJECTED on-chain. |
-| **P4** | **Latch** over relayer + keeper (key custody, spend cap, allowlist, audit). | Relayer signs via Latch; over-budget call blocked at the proxy. |
-| **P5** | Multi-agent / monitoring / activity view polish. | Agent-activity log reconstructs user→agent→authorization→action→result. |
+`packages/core` contains the application services:
 
-Core demo = **P1–P3**. **P4 (Latch)** is the differentiator for a Rialo submission. Dev on GenLayer **studionet** (gasless) → demo on **testnet-asimov**.
+- `env.ts` validates runtime configuration and keys;
+- `chain.ts` owns public reads and relayer wallet access;
+- `quote.ts` and `prices.ts` read AMM/Chainlink data;
+- `genlayer.ts` submits interpretation requests and reads results;
+- `services.ts` coordinates intent lifecycle, preparation, and autonomous
+  execution;
+- `auth.ts` implements wallet challenge/session authentication for autonomous
+  requests;
+- `db/` owns Neon Postgres access and schema migration;
+- `indexer.ts` scans contract events from the deployment block, deduplicates by
+  transaction hash and log index, and stores a block bookmark;
+- `keeper.ts` scans open orders and attempts triggered fills.
 
----
+The database stores interpretation and execution activity, not custody. Stored
+autonomous intents are owner-checked and atomically claimed before signing to
+prevent duplicate execution requests.
 
-## 8. Known limitations (state honestly in the submission)
-- Pool spot price is manipulable; Chainlink mitigates triggers but AMM depth is shallow on testnet.
-- Relayer/keeper are centralized off-chain services in the MVP (bounded, not trustless).
-- Latch enclave/attestation features are private-beta gated; MVP uses the software-proxy path.
-- GenLayer→Sepolia is one-directional read + off-chain-relayed write; no trustless bridge.
+## API and Workers
+
+The Next.js API routes and Fastify server are thin transport layers over the
+same core handlers. They cover interpretation, quote/price/reserve reads,
+wallet authentication, capability grants, vault reads, swap preparation and
+confirmation, autonomous execution, activity, orders, and cron-protected
+keeper/indexer jobs.
+
+The relayer's agent signer pays gas for autonomous transactions. It is
+untrusted: the on-chain capability and executor checks remain authoritative.
+The keeper has no special authority beyond paying gas to call the public order
+fill method. Optional Latch RPC settings can place an additional off-chain
+boundary around relayer/keeper RPC access; they do not replace on-chain caps.
+
+## Frontend Flows
+
+### Copilot
+
+1. The user connects an external wallet through Privy.
+2. The chat request is interpreted and stored.
+3. The backend prepares a quote and slippage floor.
+4. The browser approves the exact token amount if needed.
+5. The connected wallet signs and submits the swap or limit order directly.
+6. The UI records the transaction hash immediately and the indexer later
+   reconciles the on-chain event.
+
+Copilot swaps explicitly estimate gas through the app's public Sepolia RPC and
+submit that estimate with a 20% margin. This avoids injected-wallet fallback
+limits that exceed Infura's Sepolia transaction cap.
+
+### Autonomous
+
+1. The user signs and submits a bounded capability grant.
+2. The user deposits tokens into the AgentExecutor vault.
+3. The chat request is interpreted and stored.
+4. The authenticated backend resolves percentages against vault balances,
+   checks capability state, quotes the trade, and creates an agent-signed
+   EIP-712 intent.
+5. The relayer submits the typed intent to AgentExecutor.
+6. The contract revalidates every bound and moves only vault funds.
+7. For a limit order, the keeper attempts fills and the OrderBook rechecks the
+   Chainlink trigger.
+
+Autonomous confirmation mode waits for the user to trigger the backend
+execution call. Direct mode starts that call immediately after interpretation.
+Both modes use the same on-chain authorization.
+
+## Deployment and Source of Truth
+
+`contracts/script/Deploy.s.sol` deploys the Sepolia stack and writes
+`contracts/deployments/sepolia.json`. The equivalent checked-in file
+`packages/shared/src/deployment.json` is the runtime address book consumed by
+TypeScript. Contract ABIs in `packages/shared/src/abis` are checked-in
+artifacts and must be refreshed when public contract interfaces change.
+
+The current deployment is chain `11155111`. The README and shared deployment
+JSON contain the user-facing addresses and token/pool registry.
+
+## Known Limitations
+
+- This is a testnet deployment using shallow demonstration liquidity.
+- AMM spot prices are manipulable; Chainlink is used for autonomous caps and
+  limit triggers.
+- The relayer and keeper are centralized off-chain services, bounded by
+  on-chain authorization.
+- GenLayer-to-Sepolia writes are relayed off-chain; there is no trustless bridge.
+- The GenVM semantic validator currently depends on the SDK version resolved by
+  its dependency header and linter toolchain.

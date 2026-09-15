@@ -238,13 +238,37 @@ export async function copilotSwap(
   const amountIn = BigInt(prep.amountInRaw);
   await approveIfNeeded(wallet, user, prep.tokenIn, prep.router, amountIn);
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+  const args = [
+    prep.tokenIn,
+    prep.tokenOut,
+    amountIn,
+    BigInt(prep.minAmountOutRaw),
+    user,
+    deadline,
+  ] as const;
+
+  // Some injected wallet providers fall back to a block-sized gas limit when
+  // their own estimate reverts. Infura rejects that fallback on Sepolia before
+  // the transaction reaches the router. Estimate through the app's reliable
+  // read RPC instead, so a valid swap gets a realistic limit and a genuinely
+  // invalid swap still returns the contract's actual revert reason.
+  const estimatedGas = await publicClient.estimateContractGas({
+    account: user,
+    address: prep.router,
+    abi: router,
+    functionName: "swapExactTokensForTokens",
+    args,
+  });
+  const gas = estimatedGas + estimatedGas / 5n;
+
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
     address: prep.router,
     abi: router,
     functionName: "swapExactTokensForTokens",
-    args: [prep.tokenIn, prep.tokenOut, amountIn, BigInt(prep.minAmountOutRaw), user, deadline],
+    args,
+    gas,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;

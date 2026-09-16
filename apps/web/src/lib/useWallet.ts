@@ -44,9 +44,16 @@ export function useWallet(): RoqueWallet {
 
   const getClient = useCallback(async () => {
     if (!address) throw new Error("Connect a wallet first.");
-    // The provider has to come from the live list. Match it to the session
-    // address so a second connected wallet can never sign for the first.
-    const active = wallets.find((w) => w.address?.toLowerCase() === address.toLowerCase());
+    // The provider has to come from the live list. Match the session's wallet
+    // type as well as its address: MetaMask, Rabby, and other extensions can
+    // expose the same account while competing to own window.ethereum.
+    const active =
+      wallets.find(
+        (w) =>
+          w.address?.toLowerCase() === address.toLowerCase() &&
+          (!linked?.walletClientType ||
+            w.walletClientType?.toLowerCase() === linked.walletClientType.toLowerCase()),
+      ) ?? wallets.find((w) => w.address?.toLowerCase() === address.toLowerCase());
     if (!active) throw new Error("Reconnect your wallet to sign this.");
     // Privy's provider type carries a looser event signature than viem's
     // EIP1193Provider; they are the same object at runtime, so we narrow it here

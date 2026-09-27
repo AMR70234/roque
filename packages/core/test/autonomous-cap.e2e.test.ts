@@ -16,6 +16,7 @@ const state = vi.hoisted(() => ({
   freshNonce: vi.fn(),
   agentSignerAddress: vi.fn(),
   vaultBalance: vi.fn(),
+  remainingDailyUsd: vi.fn(),
   quoteSwap: vi.fn(),
   minOutForSlippage: vi.fn(),
   usdValueRaw: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../src/intents.js", () => ({
   freshNonce: state.freshNonce,
   agentSignerAddress: state.agentSignerAddress,
   vaultBalance: state.vaultBalance,
+  remainingDailyUsd: state.remainingDailyUsd,
 }));
 vi.mock("../src/genlayer.js", () => ({ interpret: vi.fn() }));
 vi.mock("../src/quote.js", () => ({
@@ -86,6 +88,8 @@ beforeEach(() => {
   });
   state.agentSignerAddress.mockReturnValue(agent);
   state.vaultBalance.mockResolvedValue(1_000_000_000n);
+  // Nothing spent today, so the daily ceiling never masks the per-trade one.
+  state.remainingDailyUsd.mockResolvedValue(2_000n * 10n ** 18n);
   state.quoteSwap.mockResolvedValue({ amountOutRaw: 1_000n });
   state.minOutForSlippage.mockReturnValue(990n);
   state.freshNonce.mockResolvedValue(1n);
@@ -115,5 +119,28 @@ describe("autonomous per-trade cap preflight", () => {
     );
     expect(state.quoteSwap).not.toHaveBeenCalled();
     expect(state.signSwapIntent).not.toHaveBeenCalled();
+  });
+});
+
+describe("autonomous daily cap preflight", () => {
+  it("refuses a trade the day's remaining headroom cannot cover", async () => {
+    // Inside the per-trade cap, but a dollar over what is left for today. The
+    // contract would revert on this; the preflight has to say so in words.
+    state.usdValueRaw.mockResolvedValue(cap);
+    state.remainingDailyUsd.mockResolvedValue(cap - 10n ** 18n);
+
+    await expect(
+      executeAutonomous({ id: "cap-boundary", user, slippageBps: 100 }),
+    ).rejects.toThrow(/left on your daily limit/iu);
+    expect(state.signSwapIntent).not.toHaveBeenCalled();
+  });
+
+  it("allows a trade exactly equal to the remaining headroom", async () => {
+    state.usdValueRaw.mockResolvedValue(cap);
+    state.remainingDailyUsd.mockResolvedValue(cap);
+
+    await expect(
+      executeAutonomous({ id: "cap-boundary", user, slippageBps: 100 }),
+    ).resolves.toMatchObject({ kind: "swap" });
   });
 });

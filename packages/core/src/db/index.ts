@@ -153,6 +153,141 @@ CREATE TABLE IF NOT EXISTS indexer_state (
   value          TEXT NOT NULL,
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ─────────────────────────────────────────────────────────────
+-- Event orders: a limit order whose trigger is a sentence
+-- ─────────────────────────────────────────────────────────────
+-- A price trigger is arithmetic, so the OrderBook can hold it on-chain. A trigger
+-- like "if a major exchange is hacked" is a judgment call, and no price feed will
+-- ever answer it. These rows are that second kind. The condition is stored as the
+-- user wrote it; the judgment layer rules on it; and when the verdict comes back
+-- met, the fill runs through the same AgentExecutor path an autonomous trade uses,
+-- so the user's on-chain caps enforce themselves and nothing new is trusted.
+--
+-- Note the screen_* columns. Before an order is ever armed we ask whether the
+-- condition is something independent validators could actually source evidence
+-- for. A condition about the user's private life, or about nothing observable at
+-- all, is rejected up front with a reason they can read, rather than resting
+-- forever as an order that can never honestly fill.
+CREATE TABLE IF NOT EXISTS event_orders (
+  id                 TEXT PRIMARY KEY,
+  user_address       TEXT NOT NULL,
+  condition          TEXT NOT NULL,
+  token_in           TEXT NOT NULL,
+  token_out          TEXT NOT NULL,
+  amount             TEXT NOT NULL,
+  amount_is_percent  BOOLEAN NOT NULL DEFAULT false,
+  slippage_bps       INTEGER NOT NULL DEFAULT 100,
+  status             TEXT NOT NULL DEFAULT 'screening'
+                       CHECK (status IN ('screening','rejected','armed','filled','failed','expired','cancelled')),
+  screen_verdict     TEXT CHECK (screen_verdict IN ('verifiable','unverifiable')),
+  screen_reason      TEXT,
+  screen_confidence  TEXT,
+  screen_sources     JSONB,
+  checks             INTEGER NOT NULL DEFAULT 0,
+  last_checked_at    TIMESTAMPTZ,
+  verdict_met        BOOLEAN,
+  verdict_confidence TEXT,
+  verdict_rationale  TEXT,
+  evidence           JSONB,
+  expires_at         TIMESTAMPTZ,
+  tx_hash            TEXT,
+  error              TEXT,
+  source_slug        TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_event_orders_user ON event_orders (user_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_event_orders_armed ON event_orders (status, last_checked_at);
+
+-- ─────────────────────────────────────────────────────────────
+-- Playbooks: chained rules the keeper walks
+-- ─────────────────────────────────────────────────────────────
+-- One event order is a single bet. A playbook is a plan: a sequence of steps, each
+-- with its own trigger (a price level, a real-world condition, or a deadline) and
+-- its own trade. The keeper watches only the step the cursor points at, so a
+-- playbook costs the same to run whether it has two steps or ten, and a step can
+-- never fire out of order. Steps live as JSONB because their shape varies by
+-- trigger kind and the set of kinds will grow; the columns hold only what the
+-- engine has to query on.
+CREATE TABLE IF NOT EXISTS playbooks (
+  id              TEXT PRIMARY KEY,
+  user_address    TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  note            TEXT,
+  status          TEXT NOT NULL DEFAULT 'draft'
+                    CHECK (status IN ('draft','armed','completed','cancelled','failed')),
+  steps           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  step_cursor     INTEGER NOT NULL DEFAULT 0,
+  slippage_bps    INTEGER NOT NULL DEFAULT 100,
+  last_checked_at TIMESTAMPTZ,
+  error           TEXT,
+  source_slug     TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_playbooks_user ON playbooks (user_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_playbooks_armed ON playbooks (status, last_checked_at);
+
+-- Every step transition, kept append-only. A playbook that did something odd can
+-- be read back move by move, which matters when the thing being audited is an
+-- agent acting on a judgment rather than a number.
+CREATE TABLE IF NOT EXISTS playbook_events (
+  id           BIGSERIAL PRIMARY KEY,
+  playbook_id  TEXT NOT NULL,
+  step_index   INTEGER NOT NULL,
+  kind         TEXT NOT NULL,
+  detail       TEXT,
+  tx_hash      TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_playbook_events_pb ON playbook_events (playbook_id, id DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- Shares: a thesis as a link somebody else can fork
+-- ─────────────────────────────────────────────────────────────
+-- The payload here is a frozen snapshot, deliberately not a reference to the live
+-- row it came from. Two reasons: the author cancelling their own order must not
+-- break everyone who forked it, and a fork must never inherit the author's sizing
+-- or address. What travels is the idea, not the position.
+CREATE TABLE IF NOT EXISTS shares (
+  slug           TEXT PRIMARY KEY,
+  kind           TEXT NOT NULL CHECK (kind IN ('event_order','playbook')),
+  author_address TEXT NOT NULL,
+  title          TEXT NOT NULL,
+  note           TEXT,
+  payload        JSONB NOT NULL,
+  forks          INTEGER NOT NULL DEFAULT 0,
+  views          INTEGER NOT NULL DEFAULT 0,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_shares_author ON shares (author_address, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- Proposals: the agent bringing work to the user
+-- ─────────────────────────────────────────────────────────────
+-- Everything else in Roque starts with the person typing. This table is the one
+-- place the agent starts the conversation: it watches positions, resting orders
+-- and the market, and files something worth a tap. The dedupe_key is what keeps
+-- that from becoming noise, since the generator runs on the same timer as the
+-- keeper and would otherwise refile the identical observation every few minutes.
+CREATE TABLE IF NOT EXISTS proposals (
+  id            TEXT PRIMARY KEY,
+  user_address  TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  detail        TEXT NOT NULL,
+  rationale     TEXT,
+  action        JSONB NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'new'
+                  CHECK (status IN ('new','accepted','dismissed','expired')),
+  dedupe_key    TEXT NOT NULL,
+  acted_at      TIMESTAMPTZ,
+  result_ref    TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_address, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_inbox ON proposals (user_address, status, created_at DESC);
 `;
 
 /** Create every table if it is not already there. Safe to call on each boot. */

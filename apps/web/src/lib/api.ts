@@ -7,15 +7,23 @@
  */
 
 import type {
+  AcceptResult,
   ActivityResult,
   AgentInfo,
   CapabilityResult,
+  EventOrder,
+  ForkResult,
   InterpretResult,
   Mode,
   OrdersResult,
+  Playbook,
+  PlaybookLogEntry,
+  PlaybookStep,
   PrepareResult,
   PriceResult,
+  Proposal,
   ReservesResult,
+  Share,
   VaultResult,
 } from "./types";
 import type { Account, WalletClient } from "viem";
@@ -39,6 +47,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return body as T;
 }
+
+type ShareKindInput = "event_order" | "playbook";
 
 interface AuthChallenge {
   challengeId: string;
@@ -88,6 +98,30 @@ async function autonomousToken(
   }
   autonomousSession = session;
   return session.token;
+}
+
+/**
+ * Whether a usable wallet session is already in hand. The screens that read
+ * private things — the conditions you trade on, your playbooks, your inbox — ask
+ * this before they start polling, so visiting a page never fires an unexpected
+ * signature request. When it comes back false they show an unlock affordance and
+ * the person decides when to sign.
+ */
+export function hasAutonomousSession(owner?: `0x${string}`): boolean {
+  if (!owner || !autonomousSession) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return (
+    autonomousSession.owner.toLowerCase() === owner.toLowerCase() &&
+    autonomousSession.expiresAt > now + 30
+  );
+}
+
+/** Sign once, deliberately, so the private screens can read. */
+export async function unlockAutonomousSession(
+  owner: `0x${string}`,
+  wallet: WalletClient,
+): Promise<void> {
+  await autonomousToken(wallet, owner);
 }
 
 function bearer(token: string): HeadersInit {
@@ -192,5 +226,190 @@ export const api = {
 
   orders(user: string) {
     return request<OrdersResult>(`/orders/${user}`);
+  },
+
+  // ── Event orders ───────────────────────────────────────────
+  //
+  // Creating and screening are deliberately two calls. A verifiability screen is
+  // a full consensus round and takes half a minute, so the order lands inert and
+  // the screen runs after, with the UI free to say what it is waiting on.
+
+  async createEventOrder(
+    input: {
+      user: `0x${string}`;
+      condition: string;
+      tokenIn: string;
+      tokenOut: string;
+      amount: string;
+      amountIsPercent?: boolean;
+      slippageBps?: number;
+      expiresInDays?: number;
+    },
+    wallet: WalletClient,
+  ) {
+    const token = await autonomousToken(wallet, input.user);
+    return request<{ order: EventOrder }>("/events", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify(input),
+    });
+  },
+
+  async screenEventOrder(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ order: EventOrder }>("/events/screen", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  async eventOrders(user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ orders: EventOrder[] }>(`/events/${user}`, { headers: bearer(token) });
+  },
+
+  async cancelEventOrder(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ order: EventOrder }>("/events/cancel", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  // ── Playbooks ──────────────────────────────────────────────
+
+  async createPlaybook(
+    input: {
+      user: `0x${string}`;
+      name: string;
+      note?: string;
+      steps: unknown[];
+      slippageBps?: number;
+    },
+    wallet: WalletClient,
+  ) {
+    const token = await autonomousToken(wallet, input.user);
+    return request<{ playbook: Playbook }>("/playbooks", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify(input),
+    });
+  },
+
+  async armPlaybook(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ playbook: Playbook }>("/playbooks/arm", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  async playbooks(user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ playbooks: Playbook[] }>(`/playbooks/${user}`, { headers: bearer(token) });
+  },
+
+  async playbook(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ playbook: Playbook; log: PlaybookLogEntry[] }>(
+      `/playbooks/detail/${id}`,
+      { headers: bearer(token) },
+    );
+  },
+
+  async cancelPlaybook(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ playbook: Playbook }>("/playbooks/cancel", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  // ── Shares ─────────────────────────────────────────────────
+  //
+  // Reading is open, so no wallet is needed to follow a link. Publishing and
+  // forking both act on an account, so both carry a session.
+
+  share(slug: string) {
+    return request<{ share: Share }>(`/shares/${slug}`);
+  },
+
+  recentShares() {
+    return request<{ shares: Share[] }>("/shares/recent");
+  },
+
+  async myShares(user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ shares: Share[] }>(`/shares/mine/${user}`, { headers: bearer(token) });
+  },
+
+  async publishShare(
+    input: { kind: ShareKindInput; id: string; title?: string; note?: string },
+    user: `0x${string}`,
+    wallet: WalletClient,
+  ) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ share: Share }>("/shares", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify(input),
+    });
+  },
+
+  async forkShare(
+    input: {
+      slug: string;
+      user: `0x${string}`;
+      amount?: string;
+      amountIsPercent?: boolean;
+      slippageBps?: number;
+      expiresInDays?: number;
+    },
+    wallet: WalletClient,
+  ) {
+    const token = await autonomousToken(wallet, input.user);
+    return request<ForkResult>("/shares/fork", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify(input),
+    });
+  },
+
+  // ── Proposals ──────────────────────────────────────────────
+
+  async proposals(user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ proposals: Proposal[] }>(`/proposals/${user}`, { headers: bearer(token) });
+  },
+
+  async refreshProposals(user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ filed: number; proposals: Proposal[] }>("/proposals/refresh", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ user }),
+    });
+  },
+
+  async acceptProposal(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<AcceptResult>("/proposals/accept", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ id }),
+    });
+  },
+
+  async dismissProposal(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ proposal: Proposal }>("/proposals/dismiss", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ id }),
+    });
   },
 };

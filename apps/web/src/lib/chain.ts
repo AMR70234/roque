@@ -153,12 +153,44 @@ async function allowance(
   }) as Promise<bigint>;
 }
 
+/**
+ * Build a complete transaction request through Roque's public RPC. Rabby and
+ * other injected wallets remain the signer, but they do not need to query
+ * their own RPC for nonce, gas, or EIP-1559 fee fields.
+ */
+async function preparedWriteFields(
+  user: `0x${string}`,
+  estimateGas: () => Promise<bigint>,
+) {
+  const [estimatedGas, nonce, fees] = await Promise.all([
+    estimateGas(),
+    publicClient.getTransactionCount({ address: user, blockTag: "pending" }),
+    publicClient.estimateFeesPerGas(),
+  ]);
+
+  return {
+    gas: estimatedGas + estimatedGas / 5n,
+    nonce,
+    maxFeePerGas: fees.maxFeePerGas,
+    maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+  };
+}
+
 /** Pull a faucet of a single test token so a fresh wallet has something to trade. */
 export async function claimFaucet(
   wallet: WalletClient,
   user: `0x${string}`,
   token: `0x${string}`,
 ): Promise<Hex> {
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: token,
+      abi: erc20,
+      functionName: "faucet",
+      args: [],
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
@@ -166,6 +198,7 @@ export async function claimFaucet(
     abi: erc20,
     functionName: "faucet",
     args: [],
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
@@ -182,6 +215,15 @@ export async function claimAllFaucets(
   user: `0x${string}`,
 ): Promise<Hex> {
   const tokenAddresses = tokenList.map((t) => t.address);
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: addresses.faucetRouter,
+      abi: faucetRouter,
+      functionName: "claimAll",
+      args: [tokenAddresses],
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
@@ -189,6 +231,7 @@ export async function claimAllFaucets(
     abi: faucetRouter,
     functionName: "claimAll",
     args: [tokenAddresses],
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
@@ -212,6 +255,15 @@ async function approveIfNeeded(
 ): Promise<void> {
   const current = await allowance(token, user, spender);
   if (current >= amount) return;
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: token,
+      abi: erc20,
+      functionName: "approve",
+      args: [spender, amount],
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
@@ -219,6 +271,7 @@ async function approveIfNeeded(
     abi: erc20,
     functionName: "approve",
     args: [spender, amount],
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
 }
@@ -237,14 +290,35 @@ export async function copilotSwap(
 ): Promise<Hex> {
   const amountIn = BigInt(prep.amountInRaw);
   await approveIfNeeded(wallet, user, prep.tokenIn, prep.router, amountIn);
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+  const latestBlock = await publicClient.getBlock({ blockTag: "latest" });
+  const deadline = latestBlock.timestamp + 30n * 60n;
+  const args = [
+    prep.tokenIn,
+    prep.tokenOut,
+    amountIn,
+    BigInt(prep.minAmountOutRaw),
+    user,
+    deadline,
+  ] as const;
+
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: prep.router,
+      abi: router,
+      functionName: "swapExactTokensForTokens",
+      args,
+    }),
+  );
+
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
     address: prep.router,
     abi: router,
     functionName: "swapExactTokensForTokens",
-    args: [prep.tokenIn, prep.tokenOut, amountIn, BigInt(prep.minAmountOutRaw), user, deadline],
+    args,
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
@@ -265,21 +339,32 @@ export async function copilotLimitOrder(
   },
 ): Promise<Hex> {
   await approveIfNeeded(wallet, user, order.tokenIn, addresses.orderBook, order.amountInRaw);
+  const args = [
+    order.tokenIn,
+    order.tokenOut,
+    order.amountInRaw,
+    order.minAmountOutRaw,
+    order.triggerPrice,
+    order.triggerAbove,
+    order.expiry,
+  ] as const;
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: addresses.orderBook,
+      abi: orderBook,
+      functionName: "createOrder",
+      args,
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
     address: addresses.orderBook,
     abi: orderBook,
     functionName: "createOrder",
-    args: [
-      order.tokenIn,
-      order.tokenOut,
-      order.amountInRaw,
-      order.minAmountOutRaw,
-      order.triggerPrice,
-      order.triggerAbove,
-      order.expiry,
-    ],
+    args,
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
@@ -297,13 +382,24 @@ export async function cancelLimitOrder(
   user: `0x${string}`,
   id: string,
 ): Promise<Hex> {
+  const args = [BigInt(id)] as const;
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: addresses.orderBook,
+      abi: orderBook,
+      functionName: "cancelOrder",
+      args,
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
     address: addresses.orderBook,
     abi: orderBook,
     functionName: "cancelOrder",
-    args: [BigInt(id)],
+    args,
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
@@ -317,13 +413,24 @@ export async function depositToVault(
   amountRaw: bigint,
 ): Promise<Hex> {
   await approveIfNeeded(wallet, user, token, addresses.agentExecutor, amountRaw);
+  const args = [token, amountRaw] as const;
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: addresses.agentExecutor,
+      abi: executor,
+      functionName: "deposit",
+      args,
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
     address: addresses.agentExecutor,
     abi: executor,
     functionName: "deposit",
-    args: [token, amountRaw],
+    args,
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
@@ -336,13 +443,24 @@ export async function withdrawFromVault(
   token: `0x${string}`,
   amountRaw: bigint,
 ): Promise<Hex> {
+  const args = [token, amountRaw] as const;
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: addresses.agentExecutor,
+      abi: executor,
+      functionName: "withdraw",
+      args,
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
     address: addresses.agentExecutor,
     abi: executor,
     functionName: "withdraw",
-    args: [token, amountRaw],
+    args,
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
@@ -353,6 +471,15 @@ export async function revokeCapability(
   wallet: WalletClient,
   user: `0x${string}`,
 ): Promise<Hex> {
+  const prepared = await preparedWriteFields(user, () =>
+    publicClient.estimateContractGas({
+      account: user,
+      address: addresses.agentExecutor,
+      abi: executor,
+      functionName: "revokeCapability",
+      args: [],
+    }),
+  );
   const hash = await wallet.writeContract({
     account: user as unknown as Account,
     chain: sepolia,
@@ -360,6 +487,7 @@ export async function revokeCapability(
     abi: executor,
     functionName: "revokeCapability",
     args: [],
+    ...prepared,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;

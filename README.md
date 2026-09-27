@@ -48,18 +48,23 @@ Latch sits over the relayer and keeper as an independent off-chain boundary: key
 
 ## Live on Sepolia
 
-Everything below is deployed and verified on Sepolia (chain id `11155111`). The GenLayer interpreter runs on studionet.
+The current deployment is on Sepolia (chain id `11155111`). The canonical
+addresses, token metadata, Chainlink feeds, prices, and all 45 pool addresses
+are maintained in [`packages/shared/src/deployment.json`](packages/shared/src/deployment.json).
 
 | Contract | Address |
 |---|---|
-| AgentExecutor | `0x56C122192a5a05d40897fa67F26a2De86fdecFf9` |
-| DEX Router | `0x2B69E5359dfc4cA575A82063B746d2b8BC346008` |
-| Order Book | `0x78a67CA08dA92c95e2E4836d718902A328dD10e4` |
-| Liquidity Pool | `0x536a50B0923942256366c56374aEaA16a789a415` |
-| USDC (test) | `0x41aB951D0e80Ae358A254c521Cd388a92385939d` |
-| WETH (test) | `0x9b325DcF0C39F620e73707181BB2AdDa0a5B7b8c` |
+| AgentExecutor | `0xff3ACF2377C831886bF674543eb4bE38DF19a5cc` |
+| DEX Router | `0x7965E72630cDBC3d0cc0D6DdC75497d674d49799` |
+| Order Book | `0x04d38a17587B4F7Ba9c477857735475aD39c61B4` |
+| Faucet Router | `0x9E3d2EBb9c2dE8665f2F198b59Fe780FA2424077` |
 | Chainlink ETH / USD feed | `0x694AA1769357215DE4FAC081bf1f309aDC325306` |
-| GenLayer interpreter (studionet) | `0xba1eEE9A8F07e7e68EEfC9E5Cd3aF396e023d357` |
+
+The deployment contains ten faucet-backed tokens:
+`rUSDC`, `rUSDT`, `rDAI`, `rWETH`, `rWBTC`, `rLINK`, `rSNX`, `rFORTH`,
+`rEURC`, and `rPAXG`. Each unordered token pair has its own pool, for 45
+direct pools in total. The GenLayer interpreter address is recorded in
+[`packages/genlayer/deployment.json`](packages/genlayer/deployment.json).
 
 ## Running it yourself
 
@@ -104,8 +109,9 @@ forge test
 The backend logic in `@roque/core` has its own tests, and the GenLayer interpreter is exercised with gltest.
 
 ```bash
-pnpm -r typecheck                       # types across the whole workspace
-cd packages/genlayer && pytest          # the interpreter, adjudication included
+pnpm check                              # typecheck, core tests, and web build
+cd contracts && forge test              # Solidity unit and fuzz tests
+cd packages/genlayer && uv run pytest   # deterministic interpreter tests
 ```
 
 ## Repo layout
@@ -126,5 +132,4 @@ One detail worth calling out: `@roque/core` ships TypeScript source rather than 
 ## A word of caution
 
 This is a demo on a testnet. The money is play money, the keys in `.env.example` are placeholders, and nothing here is financial advice. What is real is the shape of it: real signatures, real contracts, real on-chain enforcement of limits you set yourself. Bring your own testnet wallet, grab some Sepolia ETH from a faucet, and have a go.
-
 

@@ -148,7 +148,10 @@ the deployed Sepolia contracts.
 - `shares.ts` publishes an order or playbook to a public slug and forks one back
   into a caller's own account;
 - `proposals.ts` derives agent proposals from a portfolio snapshot and turns an
-  accepted proposal into a real order or playbook.
+  accepted proposal into a real order or playbook;
+- `funding.ts` decides what the vault must already hold for a set of legs to be
+  payable, and refuses a commitment it cannot cover. The arithmetic is pure and
+  the chain read is a thin wrapper over it.
 
 The database stores interpretation and execution activity, not custody. Stored
 autonomous intents are owner-checked and atomically claimed before signing to
@@ -225,24 +228,36 @@ Both modes use the same on-chain authorization.
 
 1. The user states a condition or a chain of steps. An event order is created
    `screening`; a playbook is created `draft` and armed explicitly.
-2. A local pattern screen refuses the obviously unanswerable (feelings, private
+2. Unattended trades spend from `AgentExecutor.vaultBalance[user][token]` and
+   nowhere else, so the vault is costed at the moment of commitment rather than
+   at fill time: in `createEventOrder`, which leads straight into screening and
+   arming, and in `armPlaybook`, which is where a draft becomes a commitment.
+   `createPlaybook` is deliberately left open so a plan can be drafted, shared
+   and forked before it is funded. Legs are summed per token across the whole
+   plan; a leg whose input an earlier leg produces is skipped, so a ladder is
+   not charged for money it creates. A percentage leg cannot be sized ahead of
+   its fire time, so it only asserts a non-zero balance. Funding is checked
+   before verifiability, because a consensus round is the expensive refusal and
+   this is the cheap one. The read fails closed: an unreadable balance is not
+   consent.
+3. A local pattern screen refuses the obviously unanswerable (feelings, private
    matters, predictions) without spending a validator round trip.
-3. The judgment worker screens surviving conditions through GenLayer. The order
+4. The judgment worker screens surviving conditions through GenLayer. The order
    becomes `armed` with its sources recorded, or `rejected` with a reason. A
    screening call that fails leaves the row in `screening` to be retried, since a
    failure to ask is not a verdict.
-4. While armed, the worker gathers evidence and adjudicates on the check
+5. While armed, the worker gathers evidence and adjudicates on the check
    interval. A `met` verdict at high or medium confidence executes through the
    same `AgentExecutor` path as any autonomous trade, so the user's signed caps,
    slippage gate, and expiry apply unchanged. Low confidence is recorded and
    does not fill.
-5. Playbooks advance one step per pass, in order, and a step's own trigger
+6. Playbooks advance one step per pass, in order, and a step's own trigger
    (immediate, price, delay, or event) decides readiness. A failed fill fails
    the playbook rather than skipping ahead.
-6. Publishing writes a `shares` row; forking re-validates every stored step
+7. Publishing writes a `shares` row; forking re-validates every stored step
    against the current token registry, records `source_slug`, and sizes the
    position against the forker's own vault.
-7. The proposals worker snapshots each active vault and derives proposals
+8. The proposals worker snapshots each active vault and derives proposals
    (`capability-expiring`, `rejected-condition`, `far-trigger`,
    `drawdown-ladder`, `rally-trim`, `idle-vault`). Bucketed dedupe keys keep a
    drifting price from refiling the same idea. Accepting one creates an ordinary

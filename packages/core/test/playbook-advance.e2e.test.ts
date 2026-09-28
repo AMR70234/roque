@@ -19,9 +19,13 @@ const state = vi.hoisted(() => ({
   gatherEvidence: vi.fn(),
   preflightVaultSwap: vi.fn(),
   executeVaultSwap: vi.fn(),
+  vaultBalance: vi.fn(),
 }));
 
 vi.mock("../src/db/index.js", () => ({ q: state.q }));
+// The only chain read on this path is the funding gate arming does. It reads a
+// balance we choose, so the real gate runs rather than being mocked away.
+vi.mock("../src/intents.js", () => ({ vaultBalance: state.vaultBalance }));
 vi.mock("../src/genlayer.js", () => ({ adjudicate: state.adjudicate, interpret: vi.fn() }));
 vi.mock("../src/services.js", () => ({
   preflightVaultSwap: state.preflightVaultSwap,
@@ -42,7 +46,7 @@ vi.mock("../src/events.js", () => ({
   EVENT_CHECK_INTERVAL_MS: 10 * 60 * 1000,
 }));
 
-const { advancePlaybook, normaliseStep } = await import("../src/playbooks.js");
+const { advancePlaybook, armPlaybook, normaliseStep } = await import("../src/playbooks.js");
 
 const user = "0x1111111111111111111111111111111111111111" as const;
 const TX = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -128,6 +132,22 @@ beforeEach(() => {
       });
       return [{ ...row }];
     }
+    if (t.includes("SET status='armed'")) {
+      Object.assign(row, {
+        status: "armed",
+        steps: JSON.parse(String(params[1])) as PlaybookStep[],
+        step_cursor: 0,
+        error: null,
+      });
+      return [{ ...row }];
+    }
+    if (t.includes("SET steps=$2::jsonb, error=$3")) {
+      Object.assign(row, {
+        steps: JSON.parse(String(params[1])) as PlaybookStep[],
+        error: params[2],
+      });
+      return [{ ...row }];
+    }
     throw new Error(`Unhandled test query: ${t}`);
   });
 
@@ -141,6 +161,98 @@ beforeEach(() => {
   });
   state.preflightVaultSwap.mockResolvedValue({ amountInRaw: 1n, minOutRaw: 1n });
   state.executeVaultSwap.mockResolvedValue(TX);
+  state.vaultBalance.mockResolvedValue(10_000_000_000n); // 10,000 rUSDC
+});
+
+// ─────────────────────────────────────────────────────────────
+// Arming is the signature, so arming is where the vault is checked
+// ─────────────────────────────────────────────────────────────
+
+describe("armPlaybook", () => {
+  const absolute = (amount: string) =>
+    normaliseStep(
+      { trigger: { kind: "immediate" }, action: { tokenIn: "rUSDC", tokenOut: "rWETH", amount, amountIsPercent: false } },
+      0,
+    );
+
+  beforeEach(() => {
+    row = baseRow([absolute("100")], { status: "draft" });
+  });
+
+  it("arms a plan the vault can pay for", async () => {
+    const pb = await armPlaybook("pb-1", user);
+
+    expect(pb.status).toBe("armed");
+    expect(pb.steps[0]!.armedAt).not.toBeNull();
+    expect(state.vaultBalance).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to arm a plan the vault cannot pay for, and names the step", async () => {
+    state.vaultBalance.mockResolvedValue(40_000_000n); // 40 rUSDC
+
+    await expect(armPlaybook("pb-1", user)).rejects.toThrow(
+      "Step 1 needs 100 rUSDC and your vault holds 40.",
+    );
+    // Still a draft: nothing is half-armed, and the person can resize or fund it.
+    expect(row.status).toBe("draft");
+  });
+
+  it("adds the rungs up rather than checking each on its own", async () => {
+    // 100 + 100 against a 150 balance: each rung passes alone, the plan does not.
+    row = baseRow([absolute("100"), absolute("100")], { status: "draft" });
+    state.vaultBalance.mockResolvedValue(150_000_000n);
+
+    await expect(armPlaybook("pb-1", user)).rejects.toThrow(
+      "Step 1 and Step 2 needs 200 rUSDC and your vault holds 150.",
+    );
+  });
+
+  it("does not make a ladder pre-hold what its first rung buys", async () => {
+    // Buy rWETH with rUSDC, then sell that rWETH. The vault holds no rWETH and
+    // should not have to: refusing this would refuse the headline use case.
+    row = baseRow(
+      [
+        absolute("100"),
+        normaliseStep(
+          {
+            trigger: { kind: "immediate" },
+            action: { tokenIn: "rWETH", tokenOut: "rUSDC", amount: "1", amountIsPercent: false },
+          },
+          1,
+        ),
+      ],
+      { status: "draft" },
+    );
+    state.vaultBalance.mockResolvedValue(200_000_000n);
+
+    const pb = await armPlaybook("pb-1", user);
+
+    expect(pb.status).toBe("armed");
+    // One read, for rUSDC only. A second read would mean rWETH was being asked for.
+    expect(state.vaultBalance).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks the money before paying for a consensus round", async () => {
+    // Screening an event step costs half a minute of validator time. A plan the
+    // vault cannot fund never gets that far.
+    row = baseRow([absolute("100"), mkStep({ kind: "event", condition: CONDITION })], {
+      status: "draft",
+    });
+    state.vaultBalance.mockResolvedValue(10_000_000n); // 10 rUSDC
+
+    await expect(armPlaybook("pb-1", user)).rejects.toThrow("your vault holds 10");
+    expect(state.adjudicate).not.toHaveBeenCalled();
+    expect(state.gatherEvidence).not.toHaveBeenCalled();
+  });
+
+  it("refuses a percentage rung when the vault is empty", async () => {
+    row = baseRow([mkStep({ kind: "immediate" })], { status: "draft" });
+    state.vaultBalance.mockResolvedValue(0n);
+
+    await expect(armPlaybook("pb-1", user)).rejects.toThrow(
+      "Step 1 spends a share of your rUSDC, and your vault holds none.",
+    );
+  });
 });
 
 describe("advancePlaybook", () => {

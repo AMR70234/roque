@@ -21,6 +21,7 @@ import {
   type PlaybookStep,
 } from "../src/playbooks.js";
 import { buildProposals, type UserSnapshot, type ProposalCandidate } from "../src/proposals.js";
+import { vaultFundingNeeds, type FundingLeg } from "../src/funding.js";
 import type { OpenOrder } from "../src/orders.js";
 
 // ─────────────────────────────────────────────────────────────
@@ -265,6 +266,89 @@ describe("describeStep", () => {
     expect(describeStep({ kind: "immediate" }, { ...action, amount: "25", amountIsPercent: true })).toBe(
       "Right away, swap 25% of rUSDC for rWETH",
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// vaultFundingNeeds: what the vault has to be holding before we sign
+// ─────────────────────────────────────────────────────────────
+
+describe("vaultFundingNeeds", () => {
+  const leg = (over: Partial<FundingLeg> = {}): FundingLeg => ({
+    tokenIn: "rUSDC",
+    tokenOut: "rWETH",
+    amount: "100",
+    amountIsPercent: false,
+    where: "This order",
+    ...over,
+  });
+
+  it("asks for the trade's own size, in the token's own decimals", () => {
+    expect(vaultFundingNeeds([leg()])).toEqual([
+      { symbol: "rUSDC", raw: 100_000_000n, needsSome: false, where: ["This order"] },
+    ]);
+  });
+
+  it("sums two rungs that both spend straight from the vault", () => {
+    // Two 100 rUSDC steps need 200 sitting there. Checking each against the
+    // balance on its own would wave through a plan that cannot finish.
+    const needs = vaultFundingNeeds([
+      leg({ where: "Step 1" }),
+      leg({ where: "Step 2" }),
+    ]);
+    expect(needs).toHaveLength(1);
+    expect(needs[0].raw).toBe(200_000_000n);
+    expect(needs[0].where).toEqual(["Step 1", "Step 2"]);
+  });
+
+  it("does not charge a ladder for money an earlier rung creates", () => {
+    // The canonical dip ladder: buy rWETH with rUSDC, then sell that rWETH. You
+    // are meant to be able to write this while holding no rWETH at all, so only
+    // the rUSDC is the vault's problem.
+    const needs = vaultFundingNeeds([
+      leg({ where: "Step 1" }),
+      leg({ tokenIn: "rWETH", tokenOut: "rUSDC", amount: "1", where: "Step 2" }),
+    ]);
+    expect(needs.map((n) => n.symbol)).toEqual(["rUSDC"]);
+    expect(needs[0].raw).toBe(100_000_000n);
+  });
+
+  it("keeps separate tokens separate", () => {
+    const needs = vaultFundingNeeds([
+      leg({ where: "Step 1" }),
+      leg({ tokenIn: "rDAI", tokenOut: "rWBTC", amount: "50", where: "Step 2" }),
+    ]);
+    expect(needs.map((n) => [n.symbol, n.raw])).toEqual([
+      ["rUSDC", 100_000_000n],
+      ["rDAI", 50_000_000_000_000_000_000n],
+    ]);
+  });
+
+  it("only asks a percentage leg for a balance that is not zero", () => {
+    // 25% of the vault cannot be sized now — the keeper decides it at fire time
+    // against whatever is there. What can be said now is that 25% of nothing is
+    // nothing, so an empty vault is still a refusal.
+    expect(vaultFundingNeeds([leg({ amount: "25", amountIsPercent: true })])).toEqual([
+      { symbol: "rUSDC", raw: 0n, needsSome: true, where: ["This order"] },
+    ]);
+  });
+
+  it("carries an absolute rung and a percentage rung on the same token", () => {
+    const needs = vaultFundingNeeds([
+      leg({ where: "Step 1" }),
+      leg({ amount: "25", amountIsPercent: true, where: "Step 2" }),
+    ]);
+    expect(needs).toEqual([
+      { symbol: "rUSDC", raw: 100_000_000n, needsSome: true, where: ["Step 1", "Step 2"] },
+    ]);
+  });
+
+  it("refuses to reason about a token Roque does not trade", () => {
+    expect(() => vaultFundingNeeds([leg({ tokenIn: "USDC" })])).toThrow("Unknown token USDC.");
+  });
+
+  it("has nothing to say about an empty plan", () => {
+    expect(vaultFundingNeeds([])).toEqual([]);
   });
 });
 

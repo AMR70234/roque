@@ -16,9 +16,13 @@ const state = vi.hoisted(() => ({
   ethUsd: vi.fn(),
   preflightVaultSwap: vi.fn(),
   executeVaultSwap: vi.fn(),
+  vaultBalance: vi.fn(),
 }));
 
 vi.mock("../src/db/index.js", () => ({ q: state.q }));
+// Writing an order reads the vault balance. Stubbing the read keeps the real
+// funding gate in the loop with a balance the test chooses.
+vi.mock("../src/intents.js", () => ({ vaultBalance: state.vaultBalance }));
 vi.mock("../src/genlayer.js", () => ({ adjudicate: state.adjudicate, interpret: vi.fn() }));
 vi.mock("../src/services.js", () => ({
   preflightVaultSwap: state.preflightVaultSwap,
@@ -31,7 +35,9 @@ vi.mock("../src/prices.js", () => ({
   usdValueRaw: vi.fn(),
 }));
 
-const { screenEventOrder, evaluateEventOrder } = await import("../src/events.js");
+const { createEventOrder, screenEventOrder, evaluateEventOrder } = await import(
+  "../src/events.js"
+);
 
 const user = "0x1111111111111111111111111111111111111111" as const;
 const CHECKABLE = "the Federal Reserve cuts its benchmark interest rate";
@@ -98,6 +104,21 @@ beforeEach(() => {
 
     if (t.startsWith("SELECT")) return [{ ...row }];
 
+    if (t.startsWith("INSERT INTO event_orders")) {
+      return [
+        baseRow({
+          id: params[0],
+          user_address: params[1],
+          condition: params[2],
+          token_in: params[3],
+          token_out: params[4],
+          amount: params[5],
+          amount_is_percent: params[6],
+          slippage_bps: params[7],
+        }),
+      ];
+    }
+
     if (t.includes("SET status='rejected'")) {
       Object.assign(row, {
         status: "rejected",
@@ -151,12 +172,75 @@ beforeEach(() => {
   });
 
   state.ethUsd.mockResolvedValue({ usd: 3_000 });
+  state.vaultBalance.mockResolvedValue(10_000_000_000n); // 10,000 rUSDC
   state.preflightVaultSwap.mockResolvedValue({ amountInRaw: 1n, minOutRaw: 1n });
   state.executeVaultSwap.mockResolvedValue(TX);
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => ({ ok: true, status: 200, text: async () => RSS })),
   );
+});
+
+// ─────────────────────────────────────────────────────────────
+// Writing the order is what a person signs, so it is where the vault is checked
+// ─────────────────────────────────────────────────────────────
+
+describe("createEventOrder", () => {
+  const draft = {
+    user,
+    condition: CHECKABLE,
+    tokenIn: "rUSDC",
+    tokenOut: "rWETH",
+    amount: "100",
+    amountIsPercent: false,
+    slippageBps: 100,
+  };
+
+  it("writes an order the vault can pay for", async () => {
+    const order = await createEventOrder(draft);
+
+    expect(order.status).toBe("screening");
+    expect(order.amount).toBe("100");
+    expect(state.vaultBalance).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an order the vault cannot pay for, and says by how much", async () => {
+    // The refusal has to arrive now. An order written against money the agent
+    // cannot reach would arm, rest for a fortnight, win its verdict and then
+    // fail on a balance check nobody was ever shown.
+    state.vaultBalance.mockResolvedValue(40_000_000n); // 40 rUSDC
+
+    await expect(createEventOrder(draft)).rejects.toThrow(
+      "This order needs 100 rUSDC and your vault holds 40.",
+    );
+    expect(ran("INSERT INTO event_orders")).toBe(false);
+  });
+
+  it("refuses a percentage order against an empty vault", async () => {
+    state.vaultBalance.mockResolvedValue(0n);
+
+    await expect(
+      createEventOrder({ ...draft, amount: "25", amountIsPercent: true }),
+    ).rejects.toThrow("This order spends a share of your rUSDC, and your vault holds none.");
+  });
+
+  it("takes a percentage order against a vault that holds something", async () => {
+    state.vaultBalance.mockResolvedValue(1n);
+
+    const order = await createEventOrder({ ...draft, amount: "25", amountIsPercent: true });
+
+    expect(order.amountIsPercent).toBe(true);
+  });
+
+  it("will not read the chain for an order it has already refused on its face", async () => {
+    await expect(createEventOrder({ ...draft, amount: "0" })).rejects.toThrow(
+      "The amount has to be a positive number.",
+    );
+    await expect(
+      createEventOrder({ ...draft, amount: "150", amountIsPercent: true }),
+    ).rejects.toThrow("A percentage amount has to be between 0 and 100.");
+    expect(state.vaultBalance).not.toHaveBeenCalled();
+  });
 });
 
 describe("screenEventOrder", () => {

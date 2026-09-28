@@ -25,6 +25,7 @@ import { ethUsd } from "./prices.js";
 import { adjudicate } from "./genlayer.js";
 import { preflightVaultSwap, executeVaultSwap } from "./services.js";
 import { gatherEvidence, localScreen, EVENT_CHECK_INTERVAL_MS } from "./events.js";
+import { assertVaultFunds } from "./funding.js";
 
 /** How often a waiting step is re-examined. Price is cheap; events are not. */
 export const PLAYBOOK_PRICE_INTERVAL_MS = 30_000;
@@ -299,6 +300,25 @@ export async function armPlaybook(id: string, user: string): Promise<Playbook> {
   if (row.status !== "draft") throw new Error("That playbook is not a draft.");
 
   const steps = row.steps.map((s) => ({ ...s }));
+
+  // Funding first, because it is the cheap refusal. Screening the event steps
+  // costs a consensus round each, and there is no sense spending half a minute
+  // per rung proving a plan is checkable when the vault cannot pay for it.
+  //
+  // Only the rungs the vault is actually on the hook for are counted: a step
+  // that spends what an earlier step bought is funded by the ladder itself, and
+  // insisting the person already hold it would refuse every sensible plan.
+  await assertVaultFunds(
+    row.user_address as `0x${string}`,
+    steps.map((step, index) => ({
+      tokenIn: step.action.tokenIn,
+      tokenOut: step.action.tokenOut,
+      amount: step.action.amount,
+      amountIsPercent: step.action.amountIsPercent,
+      where: `Step ${index + 1}`,
+    })),
+  );
+
   const unverifiable: string[] = [];
 
   for (const [index, step] of steps.entries()) {

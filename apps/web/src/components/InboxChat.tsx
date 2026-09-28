@@ -36,7 +36,7 @@ function findToken(text: string): string | null {
 }
 
 export function InboxChat() {
-  const { prices, ethUsd, balances, vault, activity } = useAppData();
+  const { prices, ethUsd, balances, vault, activity, orders } = useAppData();
   const [lines, setLines] = useState<Line[]>([]);
   const [value, setValue] = useState("");
   const idRef = useRef(0);
@@ -56,6 +56,19 @@ export function InboxChat() {
       if (!b) return "I cannot see your wallet yet. Connect one and try again.";
       const total = tokenList.reduce((s, t) => s + (b[t.symbol] ?? 0) * (prices[t.symbol] ?? 0), 0);
       return `Your wallet holds about ${formatUsd(total)} across all tokens.`;
+    }
+
+       if (/\borders?\b/u.test(lower)) {
+      const list = orders.data?.orders;
+      if (!list) return "I cannot read your open orders yet.";
+      const open = list.filter((o) => !o.expired);
+      if (open.length === 0) return "You have no open limit orders.";
+      const rows = open.slice(0, 3).map((o) => {
+        const side = o.triggerAbove ? "above" : "below";
+        return `${o.amountIn} ${o.tokenInSymbol} to ${o.tokenOutSymbol} when price goes ${side} $${o.triggerPrice}`;
+      });
+      const more = open.length > 3 ? ` (${open.length - 3} more not shown)` : "";
+      return `You have ${open.length} open limit order${open.length === 1 ? "" : "s"}: ${rows.join("; ")}${more}.`;
     }
 
     if (/\bvault\b/u.test(lower)) {

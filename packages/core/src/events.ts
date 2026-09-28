@@ -23,6 +23,7 @@ import { adjudicate, type Adjudication } from "./genlayer.js";
 import { q } from "./db/index.js";
 import { ethUsd } from "./prices.js";
 import { preflightVaultSwap, executeVaultSwap } from "./services.js";
+import { assertVaultFunds } from "./funding.js";
 
 /**
  * How long an armed order waits between verdicts. A GenLayer adjudication is a
@@ -357,6 +358,24 @@ export async function createEventOrder(input: CreateEventOrderInput): Promise<Ev
   if (!/^\d+(\.\d+)?$/u.test(amount) || Number(amount) <= 0) {
     throw new Error("The amount has to be a positive number.");
   }
+  if (input.amountIsPercent && Number(amount) > 100) {
+    throw new Error("A percentage amount has to be between 0 and 100.");
+  }
+
+  // The vault is the only money this order can ever spend, so it is checked
+  // here rather than at fill time. Creating the order is what a person signs,
+  // and the fill happens days later with nobody watching; refusing now is the
+  // difference between "you cannot afford this" and an order that arms, waits,
+  // gets its verdict and then quietly fails on a balance nobody mentioned.
+  await assertVaultFunds(input.user as `0x${string}`, [
+    {
+      tokenIn: tokenIn.symbol,
+      tokenOut: tokenOut.symbol,
+      amount,
+      amountIsPercent: input.amountIsPercent ?? false,
+      where: "This order",
+    },
+  ]);
 
   const days = Math.min(Math.max(input.expiresInDays ?? EVENT_DEFAULT_TTL_DAYS, 1), 90);
   const slippage = Math.min(Math.max(input.slippageBps ?? 100, 1), 5_000);

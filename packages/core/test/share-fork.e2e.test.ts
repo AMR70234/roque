@@ -12,15 +12,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlaybookStep } from "../src/playbooks.js";
 import type { EventOrderPayload, PlaybookPayload } from "../src/shares.js";
 
-const state = vi.hoisted(() => ({ q: vi.fn() }));
+const state = vi.hoisted(() => ({ q: vi.fn(), vaultBalance: vi.fn() }));
 
 vi.mock("../src/db/index.js", () => ({ q: state.q }));
-// Nothing on the fork path touches the chain or a model; stubbing these keeps
+// Nothing on the fork path submits a trade or asks a model; stubbing these keeps
 // the import graph inert rather than papering over a real call.
 vi.mock("../src/services.js", () => ({
   preflightVaultSwap: vi.fn(),
   executeVaultSwap: vi.fn(),
 }));
+// The one chain read the fork path does make is the funding check. It is stubbed
+// rather than mocked away, so the real gate runs against a balance we choose:
+// forking is exactly where someone else's position size meets your vault.
+vi.mock("../src/intents.js", () => ({ vaultBalance: state.vaultBalance }));
 vi.mock("../src/genlayer.js", () => ({ adjudicate: vi.fn(), interpret: vi.fn() }));
 vi.mock("../src/prices.js", () => ({
   ethUsd: vi.fn(),
@@ -71,6 +75,8 @@ beforeEach(() => {
   inserted = null;
   forkBumps = [];
   share = undefined;
+  // Deep enough that sizing, not funding, is what these tests are about.
+  state.vaultBalance.mockResolvedValue(10n ** 30n);
 
   state.q.mockImplementation(async (text: string, params: unknown[] = []) => {
     const t = text.replace(/\s+/gu, " ").trim();
@@ -217,6 +223,26 @@ describe("forkShare", () => {
       await expect(forkShare(SLUG, forker)).rejects.toThrow(
         "The amount has to be a positive number.",
       );
+    });
+
+    it("refuses a fork the forker's vault cannot pay for", async () => {
+      // The author's 1000 rUSDC says nothing about this person's vault. Nothing
+      // is written down, so the link cannot hand a stranger an order that arms,
+      // waits, wins its verdict and then fails on a balance check.
+      state.vaultBalance.mockResolvedValue(400_000_000n); // 400 rUSDC, six decimals
+      await expect(forkShare(SLUG, forker)).rejects.toThrow(
+        "This order needs 1000 rUSDC and your vault holds 400.",
+      );
+      expect(inserted).toBeNull();
+      expect(forkBumps).toEqual([]);
+    });
+
+    it("lets the forker take the same thesis at a size they can afford", async () => {
+      state.vaultBalance.mockResolvedValue(400_000_000n);
+      const result = await forkShare(SLUG, forker, { amount: "250" });
+
+      if (result.kind !== "event_order") throw new Error("wrong branch");
+      expect(result.order.amount).toBe("250");
     });
   });
 

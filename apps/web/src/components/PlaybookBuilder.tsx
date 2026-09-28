@@ -9,6 +9,12 @@
  * Event triggers are screened when the playbook is armed, not here, and the form
  * says so, because a step whose sentence nobody can check would stall the whole
  * plan behind it.
+ *
+ * Funding is checked the same way — at arm time on the server, and shown here as
+ * you write. A draft is only a plan, so an unfunded one still saves; what it
+ * cannot do is arm, and it is better to learn that while the size is still in
+ * front of you. The ladder's own output counts: a rung that sells what the rung
+ * above it bought is funded by the plan, not by the vault.
  */
 
 import { useState } from "react";
@@ -17,6 +23,7 @@ import { tokenList } from "@roque/shared";
 import { useAppData } from "@/providers/AppData";
 import { useToast } from "./Toaster";
 import { api } from "@/lib/api";
+import { vaultShortfall } from "@/lib/funding";
 import type { PlaybookTrigger } from "@/lib/types";
 
 type Draft = {
@@ -76,7 +83,7 @@ function describe(d: Draft): string {
 }
 
 export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
-  const { address, wallet, slippageBps } = useAppData();
+  const { address, wallet, slippageBps, vault } = useAppData();
   const toast = useToast();
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
@@ -96,6 +103,22 @@ export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
   };
 
   const ready = name.trim().length > 0 && steps.length > 0 && steps.every(valid);
+
+  // What the vault would have to be holding for the whole ladder to run. Every
+  // step is counted together, because a plan that can afford its first rung and
+  // not its second is a plan that stops halfway.
+  const shortfall = steps.every(valid)
+    ? vaultShortfall(
+        steps.map((d, i) => ({
+          tokenIn: d.tokenIn,
+          tokenOut: d.tokenOut,
+          amount: d.amount,
+          amountIsPercent: d.isPercent,
+          where: `Step ${i + 1}`,
+        })),
+        vault.data?.raw,
+      )
+    : null;
 
   const submit = async () => {
     if (!address) return;
@@ -308,6 +331,11 @@ export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
           Add a step
         </button>
         <span className="event-foot-spacer" />
+        {shortfall ? (
+          <span className="event-composer-warn is-refusal">
+            {shortfall} It saves as a draft, but it cannot be armed until then.
+          </span>
+        ) : null}
         <button className="btn btn-primary" onClick={() => void submit()} disabled={busy || !ready}>
           {busy ? <span className="spinner" /> : <Rocket size={15} />}
           Save the playbook

@@ -9,6 +9,12 @@
  * Forking copies the plan into your own vault at your own size, and it lands
  * unarmed. Deciding to put money behind someone else's idea stays a separate,
  * deliberate act — which is the only reason a link like this is safe to pass around.
+ *
+ * The author's size says nothing about this person's vault, so a forked event
+ * order is costed against it before the button will go: an event order starts
+ * screening the moment it is written, and one written against money the agent
+ * cannot reach would arm and then fail. A forked playbook lands as a draft, which
+ * commits nothing, so that one is checked when it is armed instead.
  */
 
 import { use, useState } from "react";
@@ -19,11 +25,12 @@ import { usePoll } from "@/lib/hooks";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { shorten, timeAgo } from "@/lib/format";
+import { vaultShortfall } from "@/lib/funding";
 import type { EventOrderPayload, PlaybookPayload, Share } from "@/lib/types";
 
 export default function SharePage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = use(params);
-  const { address, wallet } = useAppData();
+  const { address, wallet, vault } = useAppData();
   const toast = useToast();
   const router = useRouter();
   const [amount, setAmount] = useState("");
@@ -97,6 +104,25 @@ export default function SharePage({ params }: { params: Promise<{ slug: string }
       : `${ev.amount} ${ev.tokenIn}`
     : null;
 
+  // A blank size means the author's, so that is what gets costed out.
+  const mySize = amount.trim() || (ev ? ev.amount : "");
+  const myIsPercent = isPercent ?? (ev ? ev.amountIsPercent : false);
+  const shortfall =
+    ev && address && Number(mySize) > 0
+      ? vaultShortfall(
+          [
+            {
+              tokenIn: ev.tokenIn,
+              tokenOut: ev.tokenOut,
+              amount: mySize,
+              amountIsPercent: myIsPercent,
+              where: "This order",
+            },
+          ],
+          vault.data?.raw,
+        )
+      : null;
+
   return (
     <div className="events-screen share-screen">
       <section className="card share-hero">
@@ -168,11 +194,17 @@ export default function SharePage({ params }: { params: Promise<{ slug: string }
               %
             </button>
           </div>
-          <button className="btn btn-primary" onClick={() => void fork()} disabled={busy}>
+          <button
+            className="btn btn-primary"
+            onClick={() => void fork()}
+            disabled={busy || shortfall !== null}
+            title={shortfall ?? undefined}
+          >
             {busy ? <span className="spinner" /> : <GitFork size={15} />}
             Fork it
           </button>
         </div>
+        {shortfall ? <p className="playbook-fund-warn">{shortfall}</p> : null}
         <p className="share-fork-hint">
           Leave the size blank to keep the author&rsquo;s, whatever that was.
         </p>

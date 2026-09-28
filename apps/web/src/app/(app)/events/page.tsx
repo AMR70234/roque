@@ -17,6 +17,7 @@ import { usePoll } from "@/lib/hooks";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
+import { VaultFundedNotice } from "@/components/VaultFundedNotice";
 import { EventOrderComposer } from "@/components/EventOrderComposer";
 import { EventOrderCard } from "@/components/EventOrderCard";
 import type { EventOrder } from "@/lib/types";
@@ -114,6 +115,8 @@ export default function EventsPage() {
       </section>
 
       <PrivateGate what="Event orders" />
+
+      <VaultFundedNotice what="Event orders" />
 
       {live ? (
         <>

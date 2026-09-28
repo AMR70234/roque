@@ -82,6 +82,59 @@ export {
   type OwnerSession,
 } from "./auth.js";
 
+// The four judgment-driven products that sit on top of the rules above.
+export {
+  createEventOrder,
+  screenEventOrder,
+  evaluateEventOrder,
+  listEventOrders,
+  getEventOrder,
+  cancelEventOrder,
+  eventTick,
+  gatherEvidence,
+  type EventOrder,
+  type EventOrderStatus,
+  type Evidence,
+  type EvidenceItem,
+} from "./events.js";
+export {
+  createPlaybook,
+  armPlaybook,
+  advancePlaybook,
+  listPlaybooks,
+  getPlaybook,
+  playbookLog,
+  cancelPlaybook,
+  playbookTick,
+  describeStep,
+  type Playbook,
+  type PlaybookStep,
+  type PlaybookTrigger,
+  type PlaybookAction,
+  type StepStatus,
+} from "./playbooks.js";
+export {
+  shareEventOrder,
+  sharePlaybook,
+  readShare,
+  peekShare,
+  listShares,
+  recentShares,
+  forkShare,
+  type Share,
+  type ShareKind,
+  type ForkResult,
+} from "./shares.js";
+export {
+  generateProposals,
+  listProposals,
+  acceptProposal,
+  dismissProposal,
+  proposalTick,
+  type Proposal,
+  type ProposalAction,
+} from "./proposals.js";
+
 // The transport-agnostic request handlers both backends share.
 export * as api from "./api.js";
 export { ApiError } from "./api.js";

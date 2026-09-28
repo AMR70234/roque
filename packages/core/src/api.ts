@@ -30,6 +30,38 @@ import {
   agentSignerAddress,
 } from "./intents.js";
 import { keeperTick } from "./keeper.js";
+import {
+  createEventOrder,
+  screenEventOrder,
+  listEventOrders,
+  getEventOrder,
+  cancelEventOrder,
+  eventTick,
+} from "./events.js";
+import {
+  createPlaybook,
+  armPlaybook,
+  listPlaybooks,
+  getPlaybook,
+  playbookLog,
+  cancelPlaybook,
+  playbookTick,
+} from "./playbooks.js";
+import {
+  shareEventOrder,
+  sharePlaybook,
+  readShare,
+  listShares,
+  recentShares,
+  forkShare,
+} from "./shares.js";
+import {
+  listProposals,
+  acceptProposal,
+  dismissProposal,
+  generateProposals,
+  proposalTick,
+} from "./proposals.js";
 import { indexToHead } from "./indexer.js";
 import { q as dbQuery } from "./db/index.js";
 import {
@@ -436,4 +468,261 @@ export async function handlePriceHistory(searchParams: URLSearchParams) {
     pair: input.pair,
     points: rows.map((r) => ({ t: new Date(r.recorded_at).getTime(), price: Number(r.price) })),
   };
+}
+
+// ─────────────────────────────────────────────────────────────
+// Event orders
+// ─────────────────────────────────────────────────────────────
+//
+// Anything below that can end in a trade is gated on the same wallet session the
+// autonomous path uses, because an event order is an autonomous instruction with
+// a longer fuse. The user-scoped reads are gated too: the conditions somebody
+// chooses to trade on are their business, not a public record like a vault
+// balance on-chain.
+
+const eventOrderSchema = z.object({
+  user: address,
+  condition: z.string().min(12, "Describe the event in a little more detail.").max(500),
+  tokenIn: symbol,
+  tokenOut: symbol,
+  amount: z.string().regex(/^\d+(\.\d+)?$/u, "The amount has to be a number."),
+  amountIsPercent: z.boolean().default(false),
+  slippageBps: z.number().int().min(1).max(5_000).default(100),
+  expiresInDays: z.number().int().min(1).max(90).optional(),
+});
+
+/**
+ * Record the order. Screening is deliberately not done here: a consensus round
+ * takes half a minute, far past what a request should hold open, so the order
+ * lands inert and the screen is its own call. Nothing can fill until it passes.
+ */
+export async function handleCreateEventOrder(body: unknown, sessionToken?: string) {
+  const input = parse(eventOrderSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken, input.user);
+  try {
+    return { order: await createEventOrder({ ...input, user: owner }) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+const idSchema = z.object({ id: z.string().uuid("That is not an order I recognise.") });
+
+/** Run the verifiability screen. Slow by nature; the caller must allow for it. */
+export async function handleScreenEventOrder(body: unknown, sessionToken?: string) {
+  const { id } = parse(idSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  const existing = await getEventOrder(id);
+  if (!existing) throw new ApiError(404, "No such order.");
+  if (existing.user.toLowerCase() !== owner.toLowerCase()) {
+    throw new ApiError(403, "That order is not yours.");
+  }
+  return { order: await screenEventOrder(id) };
+}
+
+export async function handleEventOrders(userRaw: string, sessionToken?: string) {
+  const user = parse(address, userRaw);
+  const owner = await requireAutonomousOwner(sessionToken, user);
+  return { orders: await listEventOrders(owner) };
+}
+
+export async function handleCancelEventOrder(body: unknown, sessionToken?: string) {
+  const { id } = parse(idSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    return { order: await cancelEventOrder(id, owner) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Playbooks
+// ─────────────────────────────────────────────────────────────
+
+const playbookSchema = z.object({
+  user: address,
+  name: z.string().min(1, "Give the playbook a name.").max(120),
+  note: z.string().max(500).optional(),
+  // Steps are validated in depth by normaliseStep, which knows the trigger
+  // shapes; zod only insists there is a bounded list of objects to validate.
+  steps: z.array(z.record(z.string(), z.unknown())).min(1, "A playbook needs at least one step.").max(10),
+  slippageBps: z.number().int().min(1).max(5_000).default(100),
+});
+
+export async function handleCreatePlaybook(body: unknown, sessionToken?: string) {
+  const input = parse(playbookSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken, input.user);
+  try {
+    return { playbook: await createPlaybook({ ...input, user: owner }) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+/** Arming screens every event trigger, so this is as slow as a screen. */
+export async function handleArmPlaybook(body: unknown, sessionToken?: string) {
+  const { id } = parse(idSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    return { playbook: await armPlaybook(id, owner) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+export async function handlePlaybooks(userRaw: string, sessionToken?: string) {
+  const user = parse(address, userRaw);
+  const owner = await requireAutonomousOwner(sessionToken, user);
+  return { playbooks: await listPlaybooks(owner) };
+}
+
+export async function handlePlaybook(idRaw: string, sessionToken?: string) {
+  const { id } = parse(idSchema, { id: idRaw });
+  const owner = await requireAutonomousOwner(sessionToken);
+  const playbook = await getPlaybook(id);
+  if (!playbook) throw new ApiError(404, "No such playbook.");
+  if (playbook.user.toLowerCase() !== owner.toLowerCase()) {
+    throw new ApiError(403, "That playbook is not yours.");
+  }
+  return { playbook, log: await playbookLog(id) };
+}
+
+export async function handleCancelPlaybook(body: unknown, sessionToken?: string) {
+  const { id } = parse(idSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    return { playbook: await cancelPlaybook(id, owner) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Shares
+// ─────────────────────────────────────────────────────────────
+//
+// Reading a share is open on purpose: a link nobody can open is not a link.
+// Publishing and forking are not, because both act on somebody's own account.
+
+const slugSchema = z.object({
+  slug: z.string().regex(/^[A-Za-z0-9-]{4,64}$/u, "That is not a link I recognise."),
+});
+
+export async function handleReadShare(slugRaw: string) {
+  const { slug } = parse(slugSchema, { slug: slugRaw });
+  const share = await readShare(slug);
+  if (!share) throw new ApiError(404, "No such link.");
+  return { share };
+}
+
+export async function handleRecentShares() {
+  return { shares: await recentShares(20) };
+}
+
+export async function handleMyShares(userRaw: string, sessionToken?: string) {
+  const user = parse(address, userRaw);
+  const owner = await requireAutonomousOwner(sessionToken, user);
+  return { shares: await listShares(owner) };
+}
+
+const publishSchema = z.object({
+  kind: z.enum(["event_order", "playbook"]),
+  id: z.string().uuid(),
+  title: z.string().min(1).max(140).optional(),
+  note: z.string().max(500).optional(),
+});
+
+export async function handlePublishShare(body: unknown, sessionToken?: string) {
+  const input = parse(publishSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    const share =
+      input.kind === "event_order"
+        ? await shareEventOrder(input.id, owner, { title: input.title, note: input.note })
+        : await sharePlaybook(input.id, owner, { title: input.title, note: input.note });
+    return { share };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+const forkSchema = z.object({
+  slug: z.string().regex(/^[A-Za-z0-9-]{4,64}$/u),
+  user: address,
+  amount: z.string().regex(/^\d+(\.\d+)?$/u).optional(),
+  amountIsPercent: z.boolean().optional(),
+  slippageBps: z.number().int().min(1).max(5_000).optional(),
+  expiresInDays: z.number().int().min(1).max(90).optional(),
+});
+
+export async function handleForkShare(body: unknown, sessionToken?: string) {
+  const input = parse(forkSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken, input.user);
+  try {
+    return await forkShare(input.slug, owner, {
+      amount: input.amount,
+      amountIsPercent: input.amountIsPercent,
+      slippageBps: input.slippageBps,
+      expiresInDays: input.expiresInDays,
+    });
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Proposals
+// ─────────────────────────────────────────────────────────────
+
+export async function handleProposals(userRaw: string, sessionToken?: string) {
+  const user = parse(address, userRaw);
+  const owner = await requireAutonomousOwner(sessionToken, user);
+  return { proposals: await listProposals(owner, "new") };
+}
+
+/** Refresh on demand, so the inbox is not hostage to the next cron tick. */
+export async function handleRefreshProposals(body: unknown, sessionToken?: string) {
+  const input = parse(z.object({ user: address }), body);
+  const owner = await requireAutonomousOwner(sessionToken, input.user);
+  const filed = await generateProposals(owner);
+  return { filed: filed.length, proposals: await listProposals(owner, "new") };
+}
+
+export async function handleAcceptProposal(body: unknown, sessionToken?: string) {
+  const { id } = parse(idSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    return await acceptProposal(id, owner);
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+export async function handleDismissProposal(body: unknown, sessionToken?: string) {
+  const { id } = parse(idSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    return { proposal: await dismissProposal(id, owner) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// The judgment tick, alongside the existing keeper and indexer
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Screen, adjudicate and advance in one pass, then refile proposals. Each part is
+ * caught on its own so a GenLayer outage cannot stop playbook price steps from
+ * running, nor either of them stop the inbox from refreshing.
+ */
+export async function handleJudgmentTick() {
+  const [events, playbooks, proposals] = await Promise.all([
+    eventTick().catch((err) => ({ error: (err as Error).message })),
+    playbookTick().catch((err) => ({ error: (err as Error).message })),
+    proposalTick().catch((err) => ({ error: (err as Error).message })),
+  ]);
+  return { events, playbooks, proposals };
 }

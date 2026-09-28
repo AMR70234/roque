@@ -7,11 +7,14 @@
  */
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Hand, Sparkles, Droplets } from "lucide-react";
+import { Hand, Sparkles, Droplets, Radar, ListOrdered, Inbox } from "lucide-react";
 
 const NAV = [
   { href: "/copilot", label: "Copilot", icon: <Hand size={16} /> },
   { href: "/autonomous", label: "Autonomous", icon: <Sparkles size={16} /> },
+  { href: "/events", label: "Events", icon: <Radar size={16} /> },
+  { href: "/playbooks", label: "Playbooks", icon: <ListOrdered size={16} /> },
+  { href: "/inbox", label: "Inbox", icon: <Inbox size={16} /> },
   { href: "/faucet", label: "Faucet", icon: <Droplets size={16} /> },
 ];
 

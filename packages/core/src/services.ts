@@ -32,6 +32,7 @@ import {
   agentSignerAddress,
   getCapability,
   vaultBalance,
+  remainingDailyUsd,
   type SwapIntent,
   type LimitIntent,
 } from "./intents.js";
@@ -93,6 +94,139 @@ async function resolveAmount(
   throw new Error(
     "A percentage of your balance can only be resolved once a wallet is connected.",
   );
+}
+
+/**
+ * Render a float as a decimal string `parseUnits` will accept. Plain
+ * `Number.prototype.toString` switches to exponent form for small values, and
+ * `parseUnits("1e-7")` throws, so a percentage of a small balance would blow up
+ * at the worst possible moment. Fixing the notation and trimming the tail keeps
+ * the value exact to the token's own precision.
+ */
+function humanAmount(value: number, decimals: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error("That works out to an amount too small to trade.");
+  }
+  const trimmed = value.toFixed(Math.min(decimals, 18)).replace(/0+$/u, "").replace(/\.$/u, "");
+  if (trimmed === "" || Number(trimmed) === 0) {
+    throw new Error("That works out to an amount too small to trade.");
+  }
+  return trimmed;
+}
+
+/** Everything a vault swap needs, once it has been proved allowed. */
+export interface VaultSwapPlan {
+  tokenIn: TokenMeta;
+  tokenOut: TokenMeta;
+  amount: string;
+  amountInRaw: bigint;
+  minOut: bigint;
+  usdValue: bigint;
+  slippageBps: number;
+}
+
+/**
+ * Prove a vault swap is allowed before anything is signed, and return the exact
+ * numbers to sign. Every rule here is one the AgentExecutor enforces anyway, so
+ * this adds no authority; what it adds is a readable sentence instead of an
+ * opaque "execution reverted", and, for the background workers, the ability to
+ * skip a fill that was certain to fail rather than pay gas to discover that.
+ *
+ * Anything that acts on a user's vault goes through here: the autonomous path a
+ * person drives, and the event orders and playbooks the keeper drives. One gate
+ * means the caps, the slippage ceiling and the signer check cannot drift apart
+ * between the paths that a person watches and the paths that run unattended.
+ */
+export async function preflightVaultSwap(params: {
+  user: `0x${string}`;
+  tokenIn: TokenMeta;
+  tokenOut: TokenMeta;
+  amount: string;
+  amountIsPercent?: boolean;
+  slippageBps: number;
+}): Promise<VaultSwapPlan> {
+  const { user, tokenIn, tokenOut } = params;
+
+  if (tokenIn.address.toLowerCase() === tokenOut.address.toLowerCase()) {
+    throw new Error("A trade needs two different tokens.");
+  }
+
+  // The capability must exist, be live, and name our agent signer. Reading it
+  // first lets us refuse politely rather than burn gas on a sure revert.
+  const cap = await getCapability(user);
+  if (!cap) throw new Error("You have not granted the agent a capability yet.");
+  if (cap.revoked) throw new Error("Your agent capability is revoked.");
+  if (cap.agentSigner.toLowerCase() !== agentSignerAddress().toLowerCase()) {
+    throw new Error("Your capability names a different agent signer.");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (Number(cap.validUntil) <= now) {
+    throw new Error("Your agent capability has expired.");
+  }
+
+  // One balance read serves both the percentage base and the sufficiency check.
+  const bal = await vaultBalance(user, tokenIn.address);
+  let amount = params.amount;
+  if (params.amountIsPercent) {
+    const percent = Number(params.amount);
+    if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
+      throw new Error("A percentage amount has to be between 0 and 100.");
+    }
+    amount = humanAmount(
+      (Number(formatUnits(bal, tokenIn.decimals)) * percent) / 100,
+      tokenIn.decimals,
+    );
+  }
+
+  const amountInRaw = parseUnits(amount, tokenIn.decimals);
+  if (amountInRaw <= 0n) throw new Error("That amount is too small to trade.");
+  if (bal < amountInRaw) {
+    throw new Error(
+      `Your vault holds ${formatUnits(bal, tokenIn.decimals)} ${tokenIn.symbol}, which is short of this trade.`,
+    );
+  }
+
+  // The two dollar ceilings, in the order the contract applies them.
+  const usdValue = await usdValueRaw(tokenIn.address, amountInRaw);
+  if (usdValue > cap.maxPerTradeUsd) {
+    throw new Error(
+      `This trade ($${Number(formatUnits(usdValue, 18)).toFixed(2)}) exceeds your per-trade limit of $${Number(formatUnits(cap.maxPerTradeUsd, 18)).toFixed(2)}.`,
+    );
+  }
+  const remaining = await remainingDailyUsd(user);
+  if (usdValue > remaining) {
+    throw new Error(
+      `This trade ($${Number(formatUnits(usdValue, 18)).toFixed(2)}) exceeds the $${Number(formatUnits(remaining, 18)).toFixed(2)} left on your daily limit.`,
+    );
+  }
+
+  // The user's slippage preference never loosens the ceiling they granted.
+  const slippageBps = Math.min(params.slippageBps, Number(cap.maxSlippageBps));
+  const quoted = await quoteSwap(tokenIn.symbol, tokenOut.symbol, amount);
+  const minOut = minOutForSlippage(quoted.amountOutRaw, slippageBps);
+
+  return { tokenIn, tokenOut, amount, amountInRaw, minOut, usdValue, slippageBps };
+}
+
+/**
+ * Sign and submit a plan that `preflightVaultSwap` already cleared. Split from
+ * the preflight so a caller can hold a claim, a database row or a step cursor
+ * between proving a trade allowed and actually sending it.
+ */
+export async function executeVaultSwap(
+  user: `0x${string}`,
+  plan: VaultSwapPlan,
+): Promise<`0x${string}`> {
+  const intent: SwapIntent = {
+    user,
+    tokenIn: plan.tokenIn.address,
+    tokenOut: plan.tokenOut.address,
+    amountIn: plan.amountInRaw,
+    minAmountOut: plan.minOut,
+    nonce: await freshNonce(user),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + INTENT_TTL_SECONDS),
+  };
+  return submitSwap(intent, await signSwapIntent(intent));
 }
 
 /**
@@ -275,43 +409,15 @@ export async function executeAutonomous(params: {
   const tokenOut = tokenBySymbol(interp.tokenOut);
   if (!tokenIn || !tokenOut) throw new Error("Unknown token in intent.");
 
-  // The capability must exist, be live, and name our agent signer. Reading it
-  // first lets us refuse politely rather than burn gas on a sure revert.
-  const cap = await getCapability(params.user);
-  if (!cap) throw new Error("You have not granted the agent a capability yet.");
-  if (cap.revoked) throw new Error("Your agent capability is revoked.");
-  if (cap.agentSigner.toLowerCase() !== agentSignerAddress().toLowerCase()) {
-    throw new Error("Your capability names a different agent signer.");
-  }
-
-  const amountStr = await resolveAmount(interp, tokenIn, params.user, "autonomous");
-  const amountInRaw = parseUnits(amountStr, tokenIn.decimals);
-
-  // Enough vaulted funds to cover it.
-  const bal = await vaultBalance(params.user, tokenIn.address);
-  if (bal < amountInRaw) {
-    throw new Error(
-      `Your vault holds ${formatUnits(bal, tokenIn.decimals)} ${tokenIn.symbol}, which is short of this trade.`,
-    );
-  }
-
-  // Check the per-trade USD cap before ever touching the chain. Without this,
-  // an over-limit trade reaches the contract and reverts there, surfacing only
-  // an opaque "execution reverted" to the person instead of a clear reason.
-  const tradeUsd = await usdValueRaw(tokenIn.address, amountInRaw);
-  if (tradeUsd > cap.maxPerTradeUsd) {
-    const tradeUsdDisplay = Number(formatUnits(tradeUsd, 18)).toFixed(2);
-    const capDisplay = Number(formatUnits(cap.maxPerTradeUsd, 18)).toFixed(2);
-    throw new Error(
-      `This trade ($${tradeUsdDisplay}) exceeds your per-trade limit of $${capDisplay}.`,
-    );
-  }
-
-  const quoted = await quoteSwap(interp.tokenIn, interp.tokenOut, amountStr);
-  const minOut = minOutForSlippage(
-    quoted.amountOutRaw,
-    Math.min(params.slippageBps, Number(cap.maxSlippageBps)),
-  );
+  // The percentage base is resolved here, against the interpretation, before the
+  // shared gate sees a concrete figure.
+  const { amountInRaw, minOut } = await preflightVaultSwap({
+    user: params.user,
+    tokenIn,
+    tokenOut,
+    amount: await resolveAmount(interp, tokenIn, params.user, "autonomous"),
+    slippageBps: params.slippageBps,
+  });
   const now = Math.floor(Date.now() / 1000);
   const nonce = await freshNonce(params.user);
 

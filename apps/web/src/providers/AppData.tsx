@@ -29,10 +29,11 @@ import type {
   Mode,
   OrdersResult,
   PriceResult,
+  Proposal,
   SettleState,
   VaultResult,
 } from "@/lib/types";
-import { api } from "@/lib/api";
+import { api, hasAutonomousSession, unlockAutonomousSession } from "@/lib/api";
 import { walletBalances, faucetClaimsRemaining } from "@/lib/chain";
 import { usePoll, type PollState } from "@/lib/hooks";
 import { useWallet, type RoqueWallet } from "@/lib/useWallet";
@@ -66,9 +67,16 @@ interface AppDataValue {
   capability: PollState<CapabilityResult>;
   activity: PollState<ActivityResult>;
   orders: PollState<OrdersResult>;
+  // The inbox, polled here rather than on its page so the navbar can badge it
+  // without a second read of the same rows.
+  proposals: PollState<Proposal[]>;
   ethUsd: number;
   prices: Record<string, number>;
   canAutonomous: boolean;
+  // Whether a wallet session is in hand for the screens that read private text.
+  sessionReady: boolean;
+  unlocking: boolean;
+  unlock: () => Promise<boolean>;
   slippageBps: number;
   setSlippageBps: (bps: number) => void;
   // Autonomous only: whether a reading waits for a tap or fires on its own.
@@ -96,6 +104,8 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const toast = useToast();
   const [slippageBps, setSlippageBps] = useState(100);
   const [execMode, setExecModeState] = useState<ExecMode>("confirm");
+  const [sessionReady, setSessionReady] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
 
   // Restore the autonomous execution choice. It defaults to the safe one, so a
   // fresh device never lands in direct execution without asking for it.
@@ -116,6 +126,43 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // A session is module-level state in the api client, so this reconciles the
+  // provider with whatever is already cached: signing on the autonomous screen
+  // unlocks the private screens too, and a wallet change locks them again.
+  useEffect(() => {
+    setSessionReady(hasAutonomousSession(address));
+  }, [address]);
+
+  /**
+   * Sign the session on purpose. Every screen that reads a private list calls
+   * this from a button rather than on mount, so a page visit never raises a
+   * wallet prompt nobody asked for.
+   */
+  const unlock = async (): Promise<boolean> => {
+    if (!address) return false;
+    if (hasAutonomousSession(address)) {
+      setSessionReady(true);
+      return true;
+    }
+    setUnlocking(true);
+    try {
+      const { client } = await wallet.getClient();
+      await unlockAutonomousSession(address, client);
+      setSessionReady(true);
+      return true;
+    } catch (err) {
+      const message = (err as Error).message || "";
+      if (/rejected|denied/iu.test(message)) {
+        toast.info("Left locked", "Nothing was read. Sign when you are ready.");
+      } else {
+        toast.error("Could not open your session", message);
+      }
+      return false;
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
   const price = usePoll(() => api.price(), 12_000, []);
   const agent = usePoll(() => api.agent(), 600_000, []);
   const balances = usePoll(address ? () => walletBalances(address) : null, 15_000, [address]);
@@ -124,6 +171,19 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const capability = usePoll(address ? () => api.capability(address) : null, 20_000, [address]);
   const activity = usePoll(address ? () => api.activity(address) : null, 15_000, [address]);
   const orders = usePoll(address ? () => api.orders(address) : null, 15_000, [address]);
+
+  // Gated on the session, like everything that reads private writing. Before the
+  // unlock this stays null and the navbar simply shows no badge.
+  const proposals = usePoll<Proposal[]>(
+    address && sessionReady
+      ? async () => {
+          const { client } = await wallet.getClient();
+          return (await api.proposals(address, client)).proposals;
+        }
+      : null,
+    30_000,
+    [address, sessionReady],
+  );
 
   const ethUsd = price.data?.ethUsd ?? 0;
   const prices = price.data?.prices ?? {};
@@ -355,9 +415,13 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     capability,
     activity,
     orders,
+    proposals,
     ethUsd,
     prices,
     canAutonomous,
+    sessionReady,
+    unlocking,
+    unlock,
     slippageBps,
     setSlippageBps,
     execMode,

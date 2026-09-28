@@ -2208,3 +2208,449 @@ html, body {
     background: var(--accent-soft);
   }
 }
+
+/* ───────────────────────────────────────────────────────────────
+ * Event orders, playbooks, shares and the inbox
+ *
+ * Four screens that all say the same thing in different ways: here is what Roque
+ * believes, and here is why. So they share one visual grammar — a status chip up
+ * top, the person's own words in their own voice, and the machine's reasoning
+ * indented beneath in a quieter tone. Sharp edges throughout, like the rest.
+ * ─────────────────────────────────────────────────────────────── */
+
+/* A smaller button for card footers, where a full 44px control would shout. */
+.btn-sm {
+  height: 34px;
+  padding: 0 12px;
+  font-size: 0.86rem;
+  gap: 6px;
+}
+
+/* Selects and inputs sit inline in these forms, so they size to content rather
+   than filling the row the way the vault's stacked form wants. */
+.event-trade-row .token-select,
+.playbook-step-row .token-select,
+.event-expiry-pick .token-select {
+  width: auto;
+  min-width: 0;
+  padding: 9px 32px 9px 11px;
+  font-size: 0.9rem;
+}
+
+.nav-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Shared screen frame ── */
+.events-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 28px 20px 64px;
+}
+.events-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.events-title { font-size: 1.9rem; font-weight: 660; letter-spacing: -0.02em; }
+.events-sub {
+  margin-top: 8px;
+  max-width: 62ch;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.events-hero-side { display: inline-flex; align-items: center; gap: 10px; }
+.events-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.84rem;
+  font-weight: 580;
+}
+.events-error {
+  padding: 12px 14px;
+  background: var(--negative-soft);
+  color: var(--negative);
+  font-size: 0.88rem;
+}
+.events-list { display: flex; flex-direction: column; gap: 14px; }
+.events-empty {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 44px 28px;
+  text-align: center;
+  color: var(--text-faint);
+}
+.events-empty p { max-width: 52ch; font-size: 0.92rem; line-height: 1.6; }
+
+/* The unlock doorway. */
+.private-gate {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 44px 28px;
+  text-align: center;
+  color: var(--text-faint);
+}
+.private-gate-title { font-size: 1.12rem; font-weight: 620; color: var(--text); }
+.private-gate-body { max-width: 56ch; font-size: 0.92rem; line-height: 1.6; }
+
+/* ── The composer ── */
+.event-composer, .playbook-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px;
+}
+.event-composer-head { display: flex; gap: 12px; color: var(--accent); }
+.event-composer-head .panel-title { color: var(--text); }
+.event-composer-sub {
+  margin-top: 6px;
+  max-width: 64ch;
+  font-size: 0.89rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.event-field { display: flex; flex-direction: column; gap: 7px; }
+.event-field-label {
+  font-size: 0.78rem;
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.event-textarea, .event-amount {
+  width: 100%;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface-2);
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.98rem;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+}
+.event-textarea:focus, .event-amount:focus { border-color: var(--accent); }
+.event-amount { width: 110px; font-variant-numeric: tabular-nums; }
+.event-amount.is-narrow { width: 82px; }
+.playbook-name, .playbook-note { width: auto; flex: 1 1 200px; }
+.event-examples { display: flex; flex-wrap: wrap; gap: 8px; }
+.event-examples .suggest-chip { font-size: 0.82rem; padding: 7px 11px; text-align: left; }
+.suggest-chip.is-bad {
+  border-color: color-mix(in srgb, var(--negative) 35%, var(--border));
+  color: var(--negative);
+  text-decoration: line-through;
+}
+.event-trade-row, .playbook-step-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.event-composer-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.event-foot-spacer { flex: 1 1 auto; }
+.event-expiry-pick { display: inline-flex; align-items: center; gap: 9px; }
+.event-composer-warn { font-size: 0.82rem; color: var(--warning); max-width: 34ch; line-height: 1.45; }
+
+/* ── One event order ── */
+.event-card {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 20px;
+}
+.event-card.is-refused { border-left: 2px solid var(--negative); }
+.event-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.event-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  font-size: 0.78rem;
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.event-card-time { font-size: 0.8rem; color: var(--text-faint); }
+.event-condition { font-size: 1.06rem; line-height: 1.55; font-weight: 520; }
+.event-condition-if {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-right: 5px;
+}
+.event-flow { display: flex; align-items: center; gap: 11px; flex-wrap: wrap; }
+.event-leg { display: inline-flex; align-items: center; gap: 7px; }
+.event-leg-text { font-size: 0.95rem; font-weight: 560; font-variant-numeric: tabular-nums; }
+.event-flow-arrow { color: var(--text-faint); }
+
+/* The screen verdict. Given real weight, because a refusal is the feature. */
+.event-screen {
+  display: flex;
+  gap: 11px;
+  padding: 13px;
+  background: var(--surface-2);
+  border-left: 2px solid var(--border-strong);
+}
+.event-screen.is-ok { border-left-color: var(--positive); }
+.event-screen.is-ok > svg { color: var(--positive); }
+.event-screen.is-refused { border-left-color: var(--negative); }
+.event-screen.is-refused > svg { color: var(--negative); }
+.event-screen.is-pending > svg { color: var(--text-faint); }
+.event-screen > svg { flex: 0 0 auto; margin-top: 2px; }
+.event-screen-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+.event-conf { font-size: 0.76rem; font-weight: 600; text-transform: lowercase; }
+.event-screen-reason, .event-screen-sources {
+  margin-top: 5px;
+  font-size: 0.87rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+.event-screen-sources { color: var(--text-faint); font-size: 0.82rem; }
+
+.event-verdict { padding-left: 13px; border-left: 2px solid var(--accent-soft); }
+.event-verdict-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 0.78rem;
+  font-weight: 620;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.event-verdict-body { margin-top: 5px; font-size: 0.89rem; line-height: 1.55; color: var(--text-dim); }
+
+.event-evidence-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.82rem;
+  font-weight: 560;
+  color: var(--text-faint);
+}
+.event-evidence-toggle:hover { color: var(--accent); }
+.event-evidence-toggle .is-flipped { transform: rotate(180deg); }
+.event-evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-left: 13px;
+  border-left: 1px solid var(--border);
+  list-style: none;
+}
+.event-evidence-list li { display: flex; flex-direction: column; gap: 2px; font-size: 0.86rem; }
+.event-evidence-list a { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); line-height: 1.45; }
+.event-evidence-src { font-size: 0.76rem; color: var(--text-faint); }
+
+.event-error { padding: 10px 12px; background: var(--negative-soft); color: var(--negative); font-size: 0.85rem; }
+.event-card-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.event-tx { display: inline-flex; align-items: center; gap: 5px; font-size: 0.84rem; color: var(--accent); }
+.event-expiry { font-size: 0.82rem; color: var(--text-faint); }
+
+/* ── Publishing a link ── */
+.share-out { display: inline-flex; align-items: center; gap: 6px; }
+.share-url {
+  width: 220px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.78rem;
+  outline: none;
+}
+
+/* ── Playbooks ── */
+.playbook-meta { display: flex; flex-wrap: wrap; gap: 10px; }
+.playbook-steps, .playbook-ladder { list-style: none; display: flex; flex-direction: column; }
+.playbook-steps { gap: 12px; }
+.playbook-step-draft {
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface-2);
+  border-left: 2px solid var(--accent);
+}
+.playbook-step-draft.is-incomplete { border-left-color: var(--warning); }
+.playbook-step-num {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.playbook-step-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.playbook-step-read { font-size: 0.86rem; line-height: 1.5; color: var(--text-faint); font-style: italic; }
+.playbook-step-drop { flex: 0 0 auto; color: var(--text-faint); align-self: flex-start; }
+.playbook-step-drop:hover { color: var(--negative); }
+
+.playbook-card { display: flex; flex-direction: column; gap: 13px; padding: 20px; }
+.playbook-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.playbook-card-name { font-size: 1.1rem; font-weight: 620; }
+.playbook-card-note { margin-top: 4px; font-size: 0.88rem; line-height: 1.5; color: var(--text-dim); }
+.playbook-progress { font-size: 0.82rem; color: var(--text-faint); }
+.playbook-ladder { gap: 0; }
+.playbook-rung {
+  display: flex;
+  gap: 12px;
+  padding: 12px 0 12px 13px;
+  border-left: 2px solid var(--border);
+}
+.playbook-rung.status-done { border-left-color: var(--positive); }
+.playbook-rung.status-failed { border-left-color: var(--negative); }
+.playbook-rung.is-cursor { border-left-color: var(--accent); background: var(--accent-soft); }
+.playbook-rung.is-ahead { opacity: 0.55; }
+.playbook-rung-mark { flex: 0 0 auto; margin-top: 2px; color: var(--text-faint); }
+.playbook-rung.status-done .playbook-rung-mark { color: var(--positive); }
+.playbook-rung.status-failed .playbook-rung-mark { color: var(--negative); }
+.playbook-rung.is-cursor .playbook-rung-mark { color: var(--accent); }
+.playbook-rung-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.playbook-rung-label { display: flex; align-items: baseline; gap: 7px; font-size: 0.93rem; line-height: 1.5; font-weight: 530; }
+.playbook-rung-trigger { flex: 0 0 auto; color: var(--text-faint); }
+.playbook-rung-trade {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.playbook-rung-screen { display: flex; align-items: baseline; gap: 6px; font-size: 0.82rem; line-height: 1.5; color: var(--positive); }
+.playbook-rung-verdict { font-size: 0.83rem; line-height: 1.5; color: var(--text-dim); }
+.playbook-rung-error { font-size: 0.82rem; color: var(--negative); }
+.playbook-rung-now { font-size: 0.78rem; font-weight: 620; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); }
+
+/* ── A shared link, seen by whoever it reached ── */
+.share-screen { max-width: 720px; }
+.share-hero { display: flex; flex-direction: column; gap: 11px; padding: 26px; }
+.share-kind {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 5px 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 640;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.share-title { font-size: 1.55rem; font-weight: 640; line-height: 1.3; letter-spacing: -0.015em; }
+.share-note {
+  display: flex;
+  gap: 9px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-strong);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.share-note > svg { flex: 0 0 auto; margin-top: 4px; color: var(--text-faint); }
+.share-byline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82rem; color: var(--text-faint); }
+.share-plan, .share-fork { display: flex; flex-direction: column; gap: 13px; padding: 22px; }
+.share-summary { display: flex; flex-direction: column; gap: 9px; list-style: none; }
+.share-summary li {
+  padding-left: 13px;
+  border-left: 2px solid var(--accent);
+  font-size: 0.97rem;
+  line-height: 1.55;
+}
+.share-meta-note { font-size: 0.85rem; line-height: 1.55; color: var(--text-faint); }
+.share-fork-body { font-size: 0.91rem; line-height: 1.6; color: var(--text-dim); max-width: 60ch; }
+.share-fork-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.share-fork-row .event-amount { flex: 1 1 200px; width: auto; }
+.share-fork-hint { font-size: 0.82rem; color: var(--text-faint); }
+.share-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 26px; }
+
+/* ── The inbox ── */
+.proposal-card { display: flex; flex-direction: column; gap: 11px; padding: 20px; border-left: 2px solid var(--accent); }
+.proposal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.proposal-kind {
+  padding: 4px 8px;
+  background: var(--surface-2);
+  color: var(--text-faint);
+  font-size: 0.74rem;
+  font-weight: 640;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.proposal-title { font-size: 1.06rem; font-weight: 620; line-height: 1.4; }
+.proposal-detail { font-size: 0.93rem; line-height: 1.6; color: var(--text-dim); }
+.proposal-why {
+  padding-left: 12px;
+  border-left: 2px solid var(--border-strong);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--text-faint);
+}
+.proposal-why-label {
+  display: block;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-bottom: 3px;
+}
+
+@media (max-width: 720px) {
+  .events-screen { padding: 20px 14px 56px; }
+  .events-title { font-size: 1.5rem; }
+  .share-title { font-size: 1.3rem; }
+  .share-url { width: 100%; }
+  .share-out { flex: 1 1 100%; }
+  .event-card-foot, .event-composer-foot { gap: 8px; }
+}

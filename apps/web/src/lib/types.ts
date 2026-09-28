@@ -159,3 +159,202 @@ export interface ChatTurn {
 export interface AgentInfo {
   agentSigner: `0x${string}`;
 }
+
+// ─────────────────────────────────────────────────────────────
+// Event orders: a limit order whose trigger is a fact about the world
+// ─────────────────────────────────────────────────────────────
+
+export type EventOrderStatus =
+  | "screening"
+  | "rejected"
+  | "armed"
+  | "filled"
+  | "failed"
+  | "expired"
+  | "cancelled";
+
+export interface EvidenceItem {
+  source: string;
+  title: string;
+  published: string | null;
+  url: string | null;
+}
+
+export interface Evidence {
+  query: string;
+  fetchedAt: string;
+  items: EvidenceItem[];
+  market: { ethUsd: number } | null;
+  notes: string[];
+}
+
+export interface EventOrder {
+  id: string;
+  user: string;
+  condition: string;
+  tokenIn: string;
+  tokenOut: string;
+  amount: string;
+  amountIsPercent: boolean;
+  slippageBps: number;
+  status: EventOrderStatus;
+  /** Whether the validators judged the condition checkable at all. */
+  screenVerdict: "verifiable" | "unverifiable" | null;
+  screenReason: string | null;
+  screenConfidence: string | null;
+  screenSources: string[] | null;
+  checks: number;
+  lastCheckedAt: string | null;
+  verdictMet: boolean | null;
+  verdictConfidence: string | null;
+  verdictRationale: string | null;
+  evidence: Evidence | null;
+  expiresAt: string | null;
+  txHash: string | null;
+  error: string | null;
+  sourceSlug: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Playbooks: a plan the keeper walks one step at a time
+// ─────────────────────────────────────────────────────────────
+
+export type PlaybookTrigger =
+  | { kind: "immediate" }
+  | { kind: "price"; direction: "above" | "below"; usd: number }
+  | { kind: "event"; condition: string }
+  | { kind: "delay"; minutes: number };
+
+export interface PlaybookAction {
+  tokenIn: string;
+  tokenOut: string;
+  amount: string;
+  amountIsPercent?: boolean;
+}
+
+export type StepStatus = "waiting" | "firing" | "done" | "failed" | "skipped";
+
+export interface PlaybookStep {
+  id: string;
+  label: string;
+  trigger: PlaybookTrigger;
+  action: PlaybookAction;
+  status: StepStatus;
+  screen?: { verifiable: boolean; reason: string } | null;
+  txHash?: string | null;
+  error?: string | null;
+  armedAt?: string | null;
+  firedAt?: string | null;
+  checks?: number;
+  lastCheckedAt?: string | null;
+  verdict?: { met: boolean; confidence: string; rationale: string } | null;
+}
+
+export type PlaybookStatus = "draft" | "armed" | "completed" | "cancelled" | "failed";
+
+export interface Playbook {
+  id: string;
+  user: string;
+  name: string;
+  note: string | null;
+  status: PlaybookStatus;
+  steps: PlaybookStep[];
+  stepCursor: number;
+  slippageBps: number;
+  lastCheckedAt: string | null;
+  error: string | null;
+  sourceSlug: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlaybookLogEntry {
+  id: string;
+  stepIndex: number;
+  kind: string;
+  detail: string | null;
+  txHash: string | null;
+  createdAt: string;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Shares: a thesis that travels without the position
+// ─────────────────────────────────────────────────────────────
+
+export type ShareKind = "event_order" | "playbook";
+
+export interface EventOrderPayload {
+  condition: string;
+  tokenIn: string;
+  tokenOut: string;
+  amount: string;
+  amountIsPercent: boolean;
+  slippageBps: number;
+}
+
+export interface PlaybookPayload {
+  name: string;
+  note: string | null;
+  steps: PlaybookStep[];
+  slippageBps: number;
+}
+
+export interface Share {
+  slug: string;
+  kind: ShareKind;
+  author: string;
+  title: string;
+  note: string | null;
+  payload: EventOrderPayload | PlaybookPayload;
+  forks: number;
+  views: number;
+  createdAt: string;
+  /** Plain-English lines describing what forking this would set up. */
+  summary: string[];
+}
+
+export type ForkResult =
+  | { kind: "event_order"; order: EventOrder }
+  | { kind: "playbook"; playbook: Playbook };
+
+// ─────────────────────────────────────────────────────────────
+// Proposals: the agent speaking first
+// ─────────────────────────────────────────────────────────────
+
+export type ProposalStatus = "new" | "accepted" | "dismissed" | "expired";
+
+export type ProposalAction =
+  | {
+      type: "event_order";
+      condition: string;
+      tokenIn: string;
+      tokenOut: string;
+      amount: string;
+      amountIsPercent?: boolean;
+    }
+  | { type: "playbook"; name: string; note?: string; steps: unknown[] }
+  | { type: "cancel_event_order"; id: string }
+  | { type: "open"; href: string; label: string };
+
+export interface Proposal {
+  id: string;
+  user: string;
+  kind: string;
+  title: string;
+  detail: string;
+  rationale: string | null;
+  action: ProposalAction;
+  status: ProposalStatus;
+  dedupeKey: string;
+  actedAt: string | null;
+  resultRef: string | null;
+  createdAt: string;
+}
+
+export interface AcceptResult {
+  proposal: Proposal;
+  created: { kind: "event_order" | "playbook"; id: string } | null;
+  href: string | null;
+}

@@ -108,6 +108,22 @@ transaction. Its result is advisory until the backend and contracts validate
 it again. GenLayer deployment metadata is in
 `packages/genlayer/deployment.json`.
 
+The same contract's `adjudicate(request_id, condition, evidence_json)` method
+serves two distinct stages for event orders, and both return
+`{ met, confidence, rationale }`:
+
+1. **Verifiability screening**, asked at arm time about the question itself:
+   could any public source settle this condition? A `met: false` here means the
+   condition is unanswerable, and the order is rejected with the rationale
+   recorded.
+2. **The verdict**, asked repeatedly against freshly gathered evidence while the
+   order rests: has the event now happened?
+
+A single method covers both because the second stage is only reachable for
+conditions the first stage already accepted. No IC redeploy was required to add
+event orders, playbooks, or proposals; they compose the deployed interpreter and
+the deployed Sepolia contracts.
+
 ## Backend and Persistence
 
 `packages/core` contains the application services:
@@ -124,18 +140,47 @@ it again. GenLayer deployment metadata is in
 - `indexer.ts` scans contract events from the deployment block, deduplicates by
   transaction hash and log index, and stores a block bookmark;
 - `keeper.ts` scans open orders and attempts triggered fills.
+- `events.ts` owns event orders: a cheap local screen, GenLayer verifiability
+  screening, evidence gathering from public news and price feeds, adjudication,
+  and execution of a met condition;
+- `playbooks.ts` owns multi-step plans, the readiness and rationing rules for
+  each trigger kind, and the single-step advance;
+- `shares.ts` publishes an order or playbook to a public slug and forks one back
+  into a caller's own account;
+- `proposals.ts` derives agent proposals from a portfolio snapshot and turns an
+  accepted proposal into a real order or playbook.
 
 The database stores interpretation and execution activity, not custody. Stored
 autonomous intents are owner-checked and atomically claimed before signing to
 prevent duplicate execution requests.
+
+The judgment features add five append-only tables: `event_orders`, `playbooks`,
+`playbook_events`, `shares`, and `proposals`. They hold intent and reasoning,
+never balances. Concurrency is handled the same way as intents: a playbook step
+is claimed with a conditional update (`WHERE step_cursor=$3 AND status='armed'
+AND (steps->$3->>'status') = 'waiting' RETURNING id`) and a worker that loses
+that race returns without trading, so two overlapping ticks cannot fire the same
+step twice.
 
 ## API and Workers
 
 The Next.js API routes and Fastify server are thin transport layers over the
 same core handlers. They cover interpretation, quote/price/reserve reads,
 wallet authentication, capability grants, vault reads, swap preparation and
-confirmation, autonomous execution, activity, orders, and cron-protected
-keeper/indexer jobs.
+confirmation, autonomous execution, activity, orders, event orders, playbooks,
+shares, the proposals inbox, and cron-protected keeper/indexer/judgment jobs.
+
+Judgment work runs on its own loop, separate from the keeper. The relayer's
+`serial()` helper wraps each worker so a pass that outlives its interval cannot
+be overlapped by a second copy reading the same due rows, and the judgment and
+proposals loops deliberately skip the boot kick so a restart does not open with
+a minutes-long GenLayer pass before the API is warm. GenLayer round trips are
+measured in tens of seconds, so screening is always its own phase and never
+inline in a request: `EVENT_TICK_BUDGET` and `PLAYBOOK_TICK_BUDGET` cap how many
+rows one pass will adjudicate, each row carries `last_checked_at` against a
+per-trigger interval (30s for price, 10 minutes for event), and
+`/api/cron/judgment` declares `maxDuration = 60` as the ceiling those budgets
+are sized for.
 
 The relayer's agent signer pays gas for autonomous transactions. It is
 untrusted: the on-chain capability and executor checks remain authoritative.
@@ -176,6 +221,33 @@ Autonomous confirmation mode waits for the user to trigger the backend
 execution call. Direct mode starts that call immediately after interpretation.
 Both modes use the same on-chain authorization.
 
+### Event Orders, Playbooks, Links, and Proposals
+
+1. The user states a condition or a chain of steps. An event order is created
+   `screening`; a playbook is created `draft` and armed explicitly.
+2. A local pattern screen refuses the obviously unanswerable (feelings, private
+   matters, predictions) without spending a validator round trip.
+3. The judgment worker screens surviving conditions through GenLayer. The order
+   becomes `armed` with its sources recorded, or `rejected` with a reason. A
+   screening call that fails leaves the row in `screening` to be retried, since a
+   failure to ask is not a verdict.
+4. While armed, the worker gathers evidence and adjudicates on the check
+   interval. A `met` verdict at high or medium confidence executes through the
+   same `AgentExecutor` path as any autonomous trade, so the user's signed caps,
+   slippage gate, and expiry apply unchanged. Low confidence is recorded and
+   does not fill.
+5. Playbooks advance one step per pass, in order, and a step's own trigger
+   (immediate, price, delay, or event) decides readiness. A failed fill fails
+   the playbook rather than skipping ahead.
+6. Publishing writes a `shares` row; forking re-validates every stored step
+   against the current token registry, records `source_slug`, and sizes the
+   position against the forker's own vault.
+7. The proposals worker snapshots each active vault and derives proposals
+   (`capability-expiring`, `rejected-condition`, `far-trigger`,
+   `drawdown-ladder`, `rally-trim`, `idle-vault`). Bucketed dedupe keys keep a
+   drifting price from refiling the same idea. Accepting one creates an ordinary
+   event order or playbook; a proposal itself has no authority to move funds.
+
 ## Deployment and Source of Truth
 
 `contracts/script/Deploy.s.sol` deploys the Sepolia stack and writes
@@ -195,5 +267,10 @@ JSON contain the user-facing addresses and token/pool registry.
 - The relayer and keeper are centralized off-chain services, bounded by
   on-chain authorization.
 - GenLayer-to-Sepolia writes are relayed off-chain; there is no trustless bridge.
+- Event-order verdicts are only as good as the evidence a validator can reach.
+  Evidence gathering is public news and price feeds over nondeterministic web
+  access, so a true event that no reachable source reports reads as not met.
+- Verifiability screening rejects an unanswerable condition, but it cannot prove
+  a condition answerable in advance of the event itself.
 - The GenVM semantic validator currently depends on the SDK version resolved by
   its dependency header and linter toolchain.

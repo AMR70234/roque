@@ -8,6 +8,10 @@
  * The form says out loud that the sentence will be screened, and the examples are
  * split into ones that pass and one that cannot, so the rule is learned here
  * rather than discovered as a refusal.
+ *
+ * The size is checked against the vault as it is typed, for the same reason. An
+ * order the vault cannot pay for is not an order, so the button goes unavailable
+ * and says what is missing rather than accepting the click and refusing it after.
  */
 
 import { useState } from "react";
@@ -16,6 +20,7 @@ import { tokenList } from "@roque/shared";
 import { useAppData } from "@/providers/AppData";
 import { useToast } from "./Toaster";
 import { api } from "@/lib/api";
+import { vaultShortfall } from "@/lib/funding";
 import type { EventOrder } from "@/lib/types";
 
 const GOOD = [
@@ -26,7 +31,7 @@ const GOOD = [
 const BAD = "my neighbour's cat comes home";
 
 export function EventOrderComposer({ onCreated }: { onCreated: (order: EventOrder) => void }) {
-  const { address, wallet, slippageBps, canAutonomous } = useAppData();
+  const { address, wallet, slippageBps, canAutonomous, vault } = useAppData();
   const toast = useToast();
   const [condition, setCondition] = useState("");
   const [tokenIn, setTokenIn] = useState("rUSDC");
@@ -67,7 +72,16 @@ export function EventOrderComposer({ onCreated }: { onCreated: (order: EventOrde
     }
   };
 
-  const ready = condition.trim().length >= 12 && tokenIn !== tokenOut && Number(amount) > 0;
+  const written = condition.trim().length >= 12 && tokenIn !== tokenOut && Number(amount) > 0;
+  // The vault is the only money this order can ever spend, so a size it cannot
+  // cover is refused here as well as on the server.
+  const shortfall = written
+    ? vaultShortfall(
+        [{ tokenIn, tokenOut, amount, amountIsPercent: isPercent, where: "This order" }],
+        vault.data?.raw,
+      )
+    : null;
+  const ready = written && !shortfall;
 
   return (
     <section className="card event-composer">
@@ -174,7 +188,9 @@ export function EventOrderComposer({ onCreated }: { onCreated: (order: EventOrde
           </select>
         </label>
         <span className="event-foot-spacer" />
-        {!canAutonomous && address ? (
+        {shortfall ? (
+          <span className="event-composer-warn is-refusal">{shortfall}</span>
+        ) : !canAutonomous && address ? (
           <span className="event-composer-warn">
             Grant Roque a trading limit on the autonomous screen before this can fill.
           </span>

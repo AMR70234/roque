@@ -2380,6 +2380,64 @@ html, body {
 .event-foot-spacer { flex: 1 1 auto; }
 .event-expiry-pick { display: inline-flex; align-items: center; gap: 9px; }
 .event-composer-warn { font-size: 0.82rem; color: var(--warning); max-width: 34ch; line-height: 1.45; }
+/* A funding refusal is not a warning, it is a no. It reads in the negative. */
+.event-composer-warn.is-refusal { color: var(--negative); max-width: 46ch; }
+
+/* ── Which money is at stake: shown above the composer on both screens ── */
+.vault-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 0;
+  background: var(--surface);
+}
+.vault-note-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.vault-note-body { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.vault-note-line {
+  font-size: 0.87rem;
+  line-height: 1.55;
+  color: var(--text-dim);
+  max-width: 74ch;
+}
+.vault-note-line strong { color: var(--text); font-weight: 620; }
+.vault-note-hold {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-size: 0.82rem;
+}
+.vault-note-label { color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.7rem; }
+.vault-note-bal { display: inline-flex; align-items: center; gap: 5px; color: var(--text); }
+.vault-note-empty { color: var(--warning); }
+.vault-note-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 560;
+  text-decoration: none;
+}
+.vault-note-link:hover { text-decoration: underline; }
+
+/* A card whose arm button is blocked on funding says so under the ladder. */
+.playbook-fund-warn {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--negative);
+}
 
 /* ── One event order ── */
 .event-card {

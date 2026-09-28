@@ -9,6 +9,11 @@
  * A screened event step carries the validators' reasoning inline, because a step
  * that cleared the screen and a step that was never screened look otherwise
  * identical and mean very different things.
+ *
+ * Arming is where a draft becomes a commitment, so it is also where the vault has
+ * to be able to pay for the whole ladder. The button is unavailable until it can,
+ * with the shortfall named underneath: the server refuses the same plan for the
+ * same reason, and being told before the click is strictly better.
  */
 
 import {
@@ -28,6 +33,8 @@ import type { Playbook, PlaybookStep, PlaybookTrigger } from "@/lib/types";
 import { ShareButton } from "./ShareButton";
 import { TokenIcon } from "./TokenIcon";
 import { formatAmount, timeAgo } from "@/lib/format";
+import { vaultShortfall } from "@/lib/funding";
+import { useAppData } from "@/providers/AppData";
 
 const EXPLORER = "https://sepolia.etherscan.io/tx/";
 
@@ -79,9 +86,25 @@ export function PlaybookCard({
   onCancel: (id: string) => void;
   busy: string | null;
 }) {
+  const { vault } = useAppData();
   const working = busy === playbook.id;
   const live = playbook.status === "armed";
   const done = playbook.steps.filter((s) => s.status === "done").length;
+
+  // Only a draft can be armed, so only a draft is worth costing out.
+  const shortfall =
+    playbook.status === "draft"
+      ? vaultShortfall(
+          playbook.steps.map((s, i) => ({
+            tokenIn: s.action.tokenIn,
+            tokenOut: s.action.tokenOut,
+            amount: s.action.amount,
+            amountIsPercent: s.action.amountIsPercent,
+            where: `Step ${i + 1}`,
+          })),
+          vault.data?.raw,
+        )
+      : null;
 
   return (
     <article className="card playbook-card">
@@ -157,13 +180,16 @@ export function PlaybookCard({
 
       {playbook.error ? <p className="event-error">{playbook.error}</p> : null}
 
+      {shortfall ? <p className="playbook-fund-warn">{shortfall}</p> : null}
+
       <footer className="event-card-foot">
         <span className="event-foot-spacer" />
         {playbook.status === "draft" ? (
           <button
             className="btn btn-primary btn-sm"
             onClick={() => onArm(playbook.id)}
-            disabled={working}
+            disabled={working || shortfall !== null}
+            title={shortfall ?? undefined}
           >
             {working ? <span className="spinner" /> : <Rocket size={14} />}
             Arm it

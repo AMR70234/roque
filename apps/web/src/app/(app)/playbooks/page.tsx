@@ -15,6 +15,7 @@ import { usePoll } from "@/lib/hooks";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
+import { VaultFundedNotice } from "@/components/VaultFundedNotice";
 import { PlaybookBuilder } from "@/components/PlaybookBuilder";
 import { PlaybookCard } from "@/components/PlaybookCard";
 import type { Playbook } from "@/lib/types";
@@ -108,6 +109,8 @@ export default function PlaybooksPage() {
       </section>
 
       <PrivateGate what="Playbooks" />
+
+      <VaultFundedNotice what="Playbook steps" />
 
       {live ? (
         <>

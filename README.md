@@ -30,6 +30,18 @@ There are two ways to trade, and you switch between them with one toggle.
 
 Either way, the market data is real, the signatures are real, and the money is Sepolia test money so nobody gets hurt while you poke at it.
 
+## Four things a price feed cannot answer
+
+The two modes above settle who signs. These four settle what you are allowed to ask for, and every one of them needs a judgment about the world rather than a number from an oracle.
+
+**Orders that wait on an event.** "Sell half my ETH if the SEC approves a spot Solana ETF" is not a price trigger, and no feed on Sepolia carries it. Roque takes the condition in your own words, gathers public evidence, and puts the question to GenLayer's validators, who have to agree before anything moves. Two guards keep that honest. A low confidence verdict does not fill. And a condition that no public source could ever settle is refused when you place it, with the reason written down, instead of resting politely forever. "My neighbour's cat comes home" is a fine wish and a broken order, and you learn which one it is in the first half minute rather than never.
+
+**Playbooks.** One condition is a trade. Several of them, in order, is a plan. A playbook is a chain of steps, each with its own trigger, and the keeper walks it one rung at a time: buy a quarter now, another quarter if ETH touches $2,565, the rest only if the Fed actually cuts. Steps fire in the order you wrote them and never out of it, because a ladder whose second rung fires before its first is not a plan, it is two random trades.
+
+**Forkable links.** Any order or playbook publishes to a short public URL. Whoever opens it sees the thesis, the triggers, and the reasoning behind them, and can fork the whole thing into their own vault at their own size. What travels is the thinking, not the position. Your capability grant stays yours, the fork sizes itself against the forker's own balance, and every stored step is validated again on the way in rather than trusted because a stranger published it.
+
+**A proposals inbox.** Here the agent speaks first. It watches your vault, your resting orders, and the market, and when it finds something worth your attention it writes up a proposal along with its reasoning: a grant about to expire with money still sitting in the vault, an order whose condition just settled the wrong way, a drawdown deep enough to ladder into, stablecoins doing nothing. Accept turns a proposal into a real order or playbook. Dismiss makes it go away and stay away. Nothing in the inbox can move money by itself, so the worst a bad proposal costs you is a glance.
+
 ## How the pieces fit
 
 Three layers, three jobs, and they are kept apart on purpose.
@@ -41,6 +53,8 @@ Three layers, three jobs, and they are kept apart on purpose.
 | Execution | "Is this transaction genuinely valid right now?" | Solidity contracts on Sepolia, the financial source of truth |
 
 Why GenLayer instead of a plain model call: interpretation runs across validators that reach consensus through the equivalence principle, so the judgment is trust minimized and the reasoning is auditable rather than a black box you take on faith. It is used only where judgment earns its place. Anything touching money stays deterministic on Sepolia.
+
+That judgment gets asked two different questions, and the second one is the one worth noticing. Before an event order is allowed to rest, the validators are asked about the question rather than about the world: could any public source settle this condition at all? Only a condition that survives the screen gets armed. The same consensus that later decides whether the event happened first decides whether the event is knowable, which is how an order that could never have filled gets refused out loud instead of quietly.
 
 Why there is an off-chain relayer at all: a GenLayer contract cannot reach across to Sepolia by itself, and it cannot produce a signature Sepolia would accept. So a finalized GenLayer decision only lands on-chain through a relayer that reads that state and signs the transaction. That relayer is untrusted by design. The on-chain caps bound it even if it is fully compromised, which is the entire point of putting the caps on-chain.
 
@@ -106,7 +120,7 @@ cd contracts
 forge test
 ```
 
-The backend logic in `@roque/core` has its own tests, and the GenLayer interpreter is exercised with gltest.
+The backend logic in `@roque/core` has its own tests, and the GenLayer interpreter is exercised with gltest. Most of that suite covers the judgment features, and the sharpest tests in it are the ones that assert nothing happens: a screening call that fails leaves the order screening rather than rejected, because "we could not ask" and "the answer is no" are different facts and only one of them is the order's fault; a low confidence verdict does not move money; and a playbook that loses the race to claim its own step walks away without trading.
 
 ```bash
 pnpm check                              # typecheck, core tests, and web build

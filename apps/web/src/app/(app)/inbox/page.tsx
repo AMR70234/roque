@@ -18,6 +18,7 @@ import { api } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
 import { ProposalCard } from "@/components/ProposalCard";
+import { InboxChat } from "@/components/InboxChat";
 
 export default function InboxPage() {
   const { address, wallet, sessionReady, proposals: inbox } = useAppData();
@@ -131,8 +132,9 @@ export default function InboxPage() {
                   busy={busy}
                 />
               ))}
-            </div>
+                        </div>
           )}
+          <InboxChat />
         </>
       ) : null}
     </div>

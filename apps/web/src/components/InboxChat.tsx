@@ -81,9 +81,14 @@ export function InboxChat() {
       return `In your vault: ${rows.map((r) => `${formatAmount(r.n)} ${r.s}`).join(", ")}.`;
     }
 
-    if (/\b(trade|trades|activity|history|recent)\b/u.test(lower)) {
+        if (/\b(trade|trades|activity|history|recent)\b/u.test(lower)) {
       const trades = activity.data?.trades ?? [];
       if (trades.length === 0) return "No settled trades on record yet.";
+      const single = /\b(last|latest|most recent)\b.*\btrade\b(?!s)/u.test(lower);
+      if (single) {
+        const t = trades[0];
+        return `Your last completed trade was ${t.amount_in} ${t.token_in} to ${t.token_out}.`;
+      }
       const last = trades.slice(0, 3).map((t) => `${t.amount_in} ${t.token_in} to ${t.token_out}`);
       return `Your latest settled trades: ${last.join("; ")}.`;
     }

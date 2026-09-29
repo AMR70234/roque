@@ -8,14 +8,16 @@
  * for advice or a prediction gets a plain refusal instead of an opinion.
  */
 
-import { useRef, useState } from "react";
-import { ArrowUp, MessageCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowUp, MessageCircle, Trash2 } from "lucide-react";
 import { tokenList } from "@roque/shared";
 import { useAppData } from "@/providers/AppData";
 import { formatAmount, formatUsd, formatPrice } from "@/lib/format";
 
 type Line = { id: number; from: "you" | "roque"; text: string };
 type Row = { symbol: string; amount: number; usd: number };
+
+const STORAGE_KEY = "roque-inbox-chat";
 
 const THANKS = /^\s*(thanks|thank you|thx|ty|cheers)( a lot| so much)?[\s!.]*$/i;
 const GREETING =
@@ -102,6 +104,13 @@ function findTokens(text: string): string[] {
   return out;
 }
 
+/** If a value is a token contract address, return its symbol; otherwise leave it as is. */
+function symbolOf(addressOrSymbol: string): string {
+  const lower = addressOrSymbol.toLowerCase();
+  const match = tokenList.find((t) => t.address.toLowerCase() === lower);
+  return match ? match.symbol : addressOrSymbol;
+}
+
 const sum = (rows: Row[]) => rows.reduce((s, r) => s + r.usd, 0);
 
 export function InboxChat() {
@@ -109,6 +118,45 @@ export function InboxChat() {
   const [lines, setLines] = useState<Line[]>([]);
   const [value, setValue] = useState("");
   const idRef = useRef(0);
+
+  // Restore the conversation once on mount, so switching tabs and coming back
+  // does not lose it. The component's own state resets on unmount; the saved
+  // copy in storage is what survives that.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Line[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        setLines(parsed);
+        idRef.current = Math.max(...parsed.map((l) => l.id));
+      }
+    } catch {
+      // A bad or blocked store just means the chat starts empty.
+    }
+  }, []);
+
+  // Persist after every change, so a mid-conversation tab switch is not lost.
+  useEffect(() => {
+    try {
+      if (lines.length > 0) {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(lines));
+      } else {
+        window.localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch {
+      // Storage full or blocked; the chat just will not survive a reload.
+    }
+  }, [lines]);
+
+  const clear = () => {
+    setLines([]);
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Nothing to clean up if storage was never reachable.
+    }
+  };
 
   const priceOf = (symbol: string): number | undefined =>
     symbol === "rWETH" && ethUsd ? ethUsd : prices[symbol];
@@ -207,18 +255,18 @@ export function InboxChat() {
       return `${now}I only see current prices here, not how they moved over time. The View Chart button on a trade card opens the price chart.`;
     }
 
-    if (TRADES.test(lower)) {
+        if (TRADES.test(lower)) {
       const trades = activity.data?.trades ?? [];
       if (trades.length === 0) return "No settled trades on record yet.";
       const single = /\b(last|latest|most recent)\b.*\btrade\b(?!s)/u.test(lower);
       if (single) {
         const t = trades[0];
-        return `Your last completed trade was ${t.amount_in} ${t.token_in} to ${t.token_out}.`;
+        return `Your last completed trade was ${t.amount_in} ${symbolOf(t.token_in)} to ${symbolOf(t.token_out)}.`;
       }
-      const last = trades.slice(0, 3).map((t) => `${t.amount_in} ${t.token_in} to ${t.token_out}`);
+      const last = trades.slice(0, 3).map((t) => `${t.amount_in} ${symbolOf(t.token_in)} to ${symbolOf(t.token_out)}`);
       return `Your latest settled trades: ${last.join("; ")}.`;
     }
-
+    
     const tokens = findTokens(text);
     if (tokens.length > 0) {
       if (HOLD.test(lower)) {
@@ -282,10 +330,16 @@ export function InboxChat() {
 
   return (
     <section className="card inbox-chat">
-      <header className="panel-head">
+            <header className="panel-head">
         <h3 className="panel-title">
           <MessageCircle size={15} /> Ask about the market
         </h3>
+        {lines.length > 0 ? (
+          <button className="console-clear" onClick={clear} title="Clear this conversation">
+            <Trash2 size={14} />
+            Clear
+          </button>
+        ) : null}
       </header>
       <div className="inbox-chat-log">
         {lines.length === 0 ? <p className="panel-empty">{HINT}</p> : null}

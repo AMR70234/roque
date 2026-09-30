@@ -247,6 +247,7 @@ export function InboxChat() {
       }
       const armed = list.filter((o) => o.status === "armed");
       const screening = list.filter((o) => o.status === "screening");
+      const ready = list.filter((o) => o.status === "screened");
       const refused = list.filter((o) => o.status === "rejected");
       const filled = list.filter((o) => o.status === "filled");
 
@@ -281,6 +282,9 @@ export function InboxChat() {
       // rather than quietly left out of the summary.
       const tail: string[] = [];
       if (screening.length > 0) tail.push(`${screening.length} waiting to be screened`);
+      // Worth naming first among the leftovers: these are the ones blocked on
+      // the person rather than on the market.
+      if (ready.length > 0) tail.push(`${ready.length} cleared and waiting for you to arm`);
       if (refused.length > 0) tail.push(`${refused.length} refused as unverifiable`);
       if (filled.length > 0) tail.push(`${filled.length} already filled`);
       if (tail.length > 0) parts.push(`Also ${tail.join(", ")}.`);

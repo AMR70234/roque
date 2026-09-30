@@ -179,7 +179,7 @@ CREATE TABLE IF NOT EXISTS event_orders (
   amount_is_percent  BOOLEAN NOT NULL DEFAULT false,
   slippage_bps       INTEGER NOT NULL DEFAULT 100,
   status             TEXT NOT NULL DEFAULT 'screening'
-                       CHECK (status IN ('screening','rejected','armed','filled','failed','expired','cancelled')),
+                       CHECK (status IN ('screening','screened','rejected','armed','filled','failed','expired','cancelled')),
   screen_verdict     TEXT CHECK (screen_verdict IN ('verifiable','unverifiable')),
   screen_reason      TEXT,
   screen_confidence  TEXT,
@@ -339,6 +339,23 @@ CREATE INDEX IF NOT EXISTS idx_vault_res_held
   ON vault_reservations (user_address, token, status);
 CREATE INDEX IF NOT EXISTS idx_vault_res_source
   ON vault_reservations (source_kind, source_id);
+
+-- ─────────────────────────────────────────────────────────────
+-- Widenings applied to tables that already exist
+-- ─────────────────────────────────────────────────────────────
+-- CREATE TABLE IF NOT EXISTS leaves an existing table exactly as it is, so a
+-- new status value needs saying twice: once in the definition above for a fresh
+-- database, and once here for one that is already running. Dropping the check
+-- first makes it idempotent, and it only ever widens the set of values allowed,
+-- so no row that was legal before becomes illegal.
+--
+-- 'screened' is the state between a passed screen and the person arming it. It
+-- exists because a screen answers "could this be checked", which is not the
+-- same question as "put my money behind it", and running the two together
+-- turned a sentence into a live commitment with nobody pressing anything.
+ALTER TABLE event_orders DROP CONSTRAINT IF EXISTS event_orders_status_check;
+ALTER TABLE event_orders ADD CONSTRAINT event_orders_status_check
+  CHECK (status IN ('screening','screened','rejected','armed','filled','failed','expired','cancelled'));
 `;
 
 /** Create every table if it is not already there. Safe to call on each boot. */

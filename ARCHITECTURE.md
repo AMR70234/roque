@@ -247,31 +247,43 @@ Both modes use the same on-chain authorization.
    before verifiability, because a consensus round is the expensive refusal and
    this is the cheap one. The read fails closed: an unreadable balance is not
    consent.
-3. The same moment writes a reservation, so the money is promised as well as
-   checked. Open claims are subtracted from the balance the next commitment is
-   judged against, and from the amount the vault panel will withdraw, which is
-   what stops one deposit backing two orders or being taken back while an order
-   waits on it. Claims are released on every exit -- filled, refused, expired,
+3. Arming writes a reservation, so the money is promised as well as checked --
+   arming rather than creating, for both features, because a screened order and
+   a draft plan are both waiting on the user and holding a balance against
+   either would lock up a vault for something that never goes live. Open claims
+   are subtracted from the balance the next commitment is judged against, and
+   from the amount the vault panel will withdraw, which is what stops one
+   deposit backing two orders or being taken back while an order waits on it. A
+   percentage leg is resolved against the free balance at that moment and the
+   resulting figure is held, since holding nothing made the commonest case
+   ("all of my rUSDC") reserve nothing at all; the fill still sizes itself at
+   fire time. Claims are released on every exit -- filled, refused, expired,
    cancelled, failed for good -- and a ladder releases one rung at a time, so a
-   rung that has traded stops holding what it spent. Drafts hold nothing.
+   rung that has traded stops holding what it spent.
 4. A local pattern screen refuses the obviously unanswerable (feelings, private
    matters, predictions) without spending a validator round trip.
 5. The judgment worker screens surviving conditions through GenLayer. The order
-   becomes `armed` with its sources recorded, or `rejected` with a reason. A
+   becomes `screened` with its sources recorded, or `rejected` with a reason. A
    screening call that fails leaves the row in `screening` to be retried, since a
    failure to ask is not a verdict.
-6. While armed, the worker gathers evidence and adjudicates on the check
+6. `screened` is a terminal state until the user arms it. A passed screen says
+   the condition could be checked, which is not the same as the user wanting
+   money behind it, so `armEventOrder` is an explicit second action. It
+   re-checks the vault (the screen is a consensus round, so the balance can have
+   moved) and it is where the reservation is taken. The keeper only evaluates
+   `armed` rows, so nothing can fill before that press.
+7. While armed, the worker gathers evidence and adjudicates on the check
    interval. A `met` verdict at high or medium confidence executes through the
    same `AgentExecutor` path as any autonomous trade, so the user's signed caps,
    slippage gate, and expiry apply unchanged. Low confidence is recorded and
    does not fill.
-7. Playbooks advance one step per pass, in order, and a step's own trigger
+8. Playbooks advance one step per pass, in order, and a step's own trigger
    (immediate, price, delay, or event) decides readiness. A failed fill fails
    the playbook rather than skipping ahead.
-8. Publishing writes a `shares` row; forking re-validates every stored step
+9. Publishing writes a `shares` row; forking re-validates every stored step
    against the current token registry, records `source_slug`, and sizes the
    position against the forker's own vault.
-9. The proposals worker snapshots each active vault and derives proposals
+10. The proposals worker snapshots each active vault and derives proposals
    (`capability-expiring`, `rejected-condition`, `far-trigger`,
    `drawdown-ladder`, `rally-trim`, `idle-vault`). Bucketed dedupe keys keep a
    drifting price from refiling the same idea. Accepting one creates an ordinary

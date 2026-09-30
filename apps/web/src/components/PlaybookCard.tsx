@@ -42,7 +42,7 @@ const STATUS_TONE: Record<Playbook["status"], string> = {
   draft: "tone-neutral",
   armed: "tone-live",
   completed: "tone-live",
-  cancelled: "tone-neutral",
+  cancelled: "tone-bad",
   failed: "tone-bad",
 };
 

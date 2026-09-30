@@ -36,7 +36,7 @@ vi.mock("../src/prices.js", () => ({
   usdValueRaw: vi.fn(),
 }));
 
-const { createEventOrder, screenEventOrder, evaluateEventOrder, cancelEventOrder } =
+const { createEventOrder, screenEventOrder, evaluateEventOrder, cancelEventOrder, armEventOrder } =
   await import("../src/events.js");
 
 const user = "0x1111111111111111111111111111111111111111" as const;
@@ -111,7 +111,16 @@ beforeEach(() => {
     sqls.push(text);
     const t = text.replace(/\s+/gu, " ").trim();
 
-    if (t.startsWith("SELECT")) return [{ ...row }];
+    if (t.startsWith("SELECT")) {
+      // Honour the owner filter when the statement carries one. The ownership
+      // guard is security-relevant, so a mock that answered regardless of who
+      // asked would make it untestable.
+      if (t.includes("LOWER(user_address)=LOWER($2)")) {
+        const asked = String(params[1] ?? "").toLowerCase();
+        if (asked !== String(row.user_address).toLowerCase()) return [];
+      }
+      return [{ ...row }];
+    }
 
     if (t.startsWith("INSERT INTO event_orders")) {
       return [
@@ -138,9 +147,9 @@ beforeEach(() => {
       });
       return [{ ...row }];
     }
-    if (t.includes("SET status='armed', screen_verdict='verifiable'")) {
+    if (t.includes("SET status='screened', screen_verdict='verifiable'")) {
       Object.assign(row, {
-        status: "armed",
+        status: "screened",
         screen_verdict: "verifiable",
         screen_reason: params[1],
         screen_confidence: params[2],
@@ -171,6 +180,10 @@ beforeEach(() => {
     }
     if (t.includes("SET status='filled'")) {
       Object.assign(row, { status: "filled", tx_hash: params[1], error: null });
+      return [{ ...row }];
+    }
+    if (t.includes("SET status='armed', error=NULL")) {
+      Object.assign(row, { status: "armed", error: null });
       return [{ ...row }];
     }
     if (t.includes("SET status='cancelled'")) {
@@ -278,7 +291,7 @@ describe("screenEventOrder", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("arms an order the validators agree is checkable, recording what it sampled", async () => {
+  it("clears an order the validators agree is checkable, recording what it sampled", async () => {
     state.adjudicate.mockResolvedValue({
       met: true,
       confidence: "high",
@@ -287,7 +300,9 @@ describe("screenEventOrder", () => {
 
     const order = await screenEventOrder("ev-1");
 
-    expect(order.status).toBe("armed");
+    // Cleared, not armed. A passed screen says the condition could be checked;
+    // arming is the person deciding to put money behind it.
+    expect(order.status).toBe("screened");
     expect(order.screenVerdict).toBe("verifiable");
     expect(order.screenConfidence).toBe("high");
     expect(order.screenSources).toEqual(["Reuters"]);
@@ -473,10 +488,12 @@ describe("evaluateEventOrder", () => {
 describe("what an event order promises the vault", () => {
   const openClaims = () => held.held().filter((r) => r.source_kind === "event_order");
 
-  it("claims the amount the moment the order is written", async () => {
+  it("claims nothing when the order is merely written", async () => {
+    // Writing is not committing. Holding a balance against every sentence
+    // somebody screened would lock up a vault for orders that never go live.
     state.vaultBalance.mockResolvedValue(500_000_000n);
 
-    const order = await createEventOrder({
+    await createEventOrder({
       user,
       condition: CHECKABLE,
       tokenIn: "rUSDC",
@@ -484,10 +501,46 @@ describe("what an event order promises the vault", () => {
       amount: "100",
     });
 
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("claims the amount when the person arms it", async () => {
+    row = baseRow({ status: "screened", screen_verdict: "verifiable" });
+    state.vaultBalance.mockResolvedValue(500_000_000n);
+
+    const order = await armEventOrder("ev-1", user);
+
+    expect(order.status).toBe("armed");
     const claims = openClaims();
     expect(claims).toHaveLength(1);
-    expect(claims[0].source_id).toBe(order.id);
+    expect(claims[0].source_id).toBe("ev-1");
     expect(claims[0].amount_raw).toBe("100000000");
+  });
+
+  it("refuses to arm an order the vault can no longer pay for", async () => {
+    // The screen is a consensus round and takes half a minute. The balance can
+    // move in that time, so arming checks again rather than trusting creation.
+    row = baseRow({ status: "screened", screen_verdict: "verifiable" });
+    state.vaultBalance.mockResolvedValue(40_000_000n);
+
+    await expect(armEventOrder("ev-1", user)).rejects.toThrow(
+      "This order needs 100 rUSDC and your vault has 40 free.",
+    );
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("will not arm an order that has not been screened", async () => {
+    row = baseRow({ status: "screening" });
+    await expect(armEventOrder("ev-1", user)).rejects.toThrow(
+      "Only an order the validators have cleared can be armed.",
+    );
+  });
+
+  it("will not arm somebody else's order", async () => {
+    row = baseRow({ status: "screened", screen_verdict: "verifiable" });
+    await expect(
+      armEventOrder("ev-1", "0x9999999999999999999999999999999999999999"),
+    ).rejects.toThrow("That order is not yours.");
   });
 
   it("lets the claim go when the condition turns out to be uncheckable", async () => {

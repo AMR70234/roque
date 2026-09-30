@@ -17,6 +17,12 @@ import { PrivateGate } from "@/components/PrivateGate";
 import { VaultFundedNotice } from "@/components/VaultFundedNotice";
 import { PlaybookBuilder } from "@/components/PlaybookBuilder";
 import { PlaybookCard } from "@/components/PlaybookCard";
+import {
+  PlaybookFilter,
+  filterPlaybooks,
+  type PlaybookGroup,
+  type PlaybookPeriod,
+} from "@/components/PlaybookFilter";
 
 export default function PlaybooksPage() {
   // Shared poll, for the same reason the events screen uses one: the inbox chat
@@ -24,6 +30,8 @@ export default function PlaybooksPage() {
   const { address, wallet, sessionReady, refreshAll, playbooks: books } = useAppData();
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
+  const [group, setGroup] = useState<PlaybookGroup>("all");
+  const [period, setPeriod] = useState<PlaybookPeriod>("all");
 
   const live = address && sessionReady;
 
@@ -69,6 +77,7 @@ export default function PlaybooksPage() {
 
   const rows = books.data ?? [];
   const running = rows.filter((p) => p.status === "armed").length;
+  const shown = filterPlaybooks(rows, group, period);
 
   return (
     <div className="events-screen">
@@ -105,14 +114,32 @@ export default function PlaybooksPage() {
 
           {books.error ? <p className="events-error">{books.error}</p> : null}
 
+          <PlaybookFilter
+            books={rows}
+            group={group}
+            period={period}
+            onGroup={setGroup}
+            onPeriod={setPeriod}
+          />
+
           {rows.length === 0 && !books.loading ? (
             <section className="card events-empty">
               <ListOrdered size={26} />
               <p>No playbooks yet. A dip ladder is a good first one: buy a slice at each level down.</p>
             </section>
+          ) : shown.length === 0 ? (
+            /* Plans exist, just none in this corner of them. Name the corner,
+               so a narrow filter never reads as an empty account. */
+            <section className="card events-empty">
+              <ListOrdered size={26} />
+              <p>
+                None of your {rows.length} playbook{rows.length === 1 ? "" : "s"} match this filter.
+                Widen the status or the period to see the rest.
+              </p>
+            </section>
           ) : (
             <div className="events-list">
-              {rows.map((p) => (
+              {shown.map((p) => (
                 <PlaybookCard
                   key={p.id}
                   playbook={p}

@@ -30,6 +30,7 @@ import {
   handleHealth,
   handleCreateEventOrder,
   handleScreenEventOrder,
+  handleArmEventOrder,
   handleEventOrders,
   handleCancelEventOrder,
   handleCreatePlaybook,
@@ -114,6 +115,9 @@ app.post("/events", async (req) =>
 );
 app.post("/events/screen", async (req) =>
   handleScreenEventOrder(req.body, bearerToken(req.headers.authorization)),
+);
+app.post("/events/arm", async (req) =>
+  handleArmEventOrder(req.body, bearerToken(req.headers.authorization)),
 );
 app.post("/events/cancel", async (req) =>
   handleCancelEventOrder(req.body, bearerToken(req.headers.authorization)),

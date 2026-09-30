@@ -86,6 +86,7 @@ export {
 export {
   createEventOrder,
   screenEventOrder,
+  armEventOrder,
   evaluateEventOrder,
   listEventOrders,
   getEventOrder,

@@ -40,6 +40,8 @@ let held: ReturnType<typeof reservationStore>;
 beforeEach(() => {
   vi.clearAllMocks();
   held = reservationStore();
+  // Resolving a percentage share reads the balance, so every suite needs one.
+  state.vaultBalance.mockResolvedValue(USDC(1000));
   state.q.mockImplementation(async (text: string, params: unknown[] = []) => {
     const handled = held.handle(text, params);
     if (handled !== null) return handled;
@@ -93,10 +95,11 @@ describe("reserve", () => {
     expect((await heldByToken(user)).get("rUSDC")?.raw).toBe(USDC(160));
   });
 
-  it("records a percentage as a share and reserves no figure for it", async () => {
-    // A percent order is sized at fire time against whatever is there, so there
-    // is no number to hold. Recording the share keeps it visible without
-    // inventing an amount the order never committed to.
+  it("resolves a percentage against the balance and holds that figure", async () => {
+    // Holding nothing for a share was useless in the case people reach for
+    // first: "spend all of my rUSDC" showed the whole balance as free right up
+    // until the order tried to fill.
+    state.vaultBalance.mockResolvedValue(USDC(1000));
     await reserve([
       {
         user,
@@ -108,8 +111,39 @@ describe("reserve", () => {
       },
     ]);
     const hold = (await heldByToken(user)).get("rUSDC");
-    expect(hold?.raw).toBe(0n);
+    expect(hold?.raw).toBe(USDC(400));
+    // The share is kept alongside the figure, so the UI can say where the
+    // number came from rather than presenting it as something typed.
     expect(hold?.percents).toEqual([40]);
+  });
+
+  it("holds the whole free balance for an order that spends all of it", async () => {
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      {
+        user,
+        token: "rUSDC",
+        amount: "100",
+        amountIsPercent: true,
+        source: "event_order",
+        sourceId: "eo-1",
+      },
+    ]);
+    expect((await heldByToken(user)).get("rUSDC")?.raw).toBe(USDC(1000));
+  });
+
+  it("resolves a second share against what the first one left", async () => {
+    // Two "half of my rUSDC" orders promise half and then a quarter, not half
+    // of the same money twice.
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      { user, token: "rUSDC", amount: "50", amountIsPercent: true, source: "event_order", sourceId: "eo-1" },
+    ]);
+    await reserve([
+      { user, token: "rUSDC", amount: "50", amountIsPercent: true, source: "event_order", sourceId: "eo-2" },
+    ]);
+    const hold = (await heldByToken(user)).get("rUSDC");
+    expect(hold?.raw).toBe(USDC(750));
   });
 
   it("keeps one person's claims out of another's", async () => {

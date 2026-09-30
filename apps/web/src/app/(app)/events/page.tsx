@@ -8,6 +8,13 @@
  * the interesting part: the validators are asked whether a sentence can be checked
  * against public evidence at all, and a sentence that cannot is refused with its
  * reasoning showing. That refusal is a feature, so it is never tidied away.
+ *
+ * Three presses, not one, and the split is deliberate. Writing records the
+ * sentence. Screening asks the validators whether it could be checked. Arming is
+ * the person deciding to put money behind the answer, and it is the only one of
+ * the three that sets any aside. Folding the last two together meant a sentence
+ * became a live commitment on somebody else's verdict with nobody pressing
+ * anything.
  */
 
 import { useState } from "react";
@@ -50,8 +57,11 @@ export default function EventsPage() {
       const { client } = await wallet.getClient();
       const res = await api.screenEventOrder(id, address, client);
       toast.dismiss(pending);
-      if (res.order.status === "armed") {
-        toast.success("Armed and watching", "Roque will look for evidence on every keeper pass.");
+      if (res.order.status === "screened") {
+        toast.success(
+          "The validators can check it",
+          "Arm it when you are ready. Nothing is set aside, and nothing can fill, until you do.",
+        );
       } else {
         toast.info("Refused, and here is why", res.order.screenReason ?? "Nothing could check it.");
       }
@@ -59,6 +69,30 @@ export default function EventsPage() {
     } catch (err) {
       toast.dismiss(pending);
       toast.error("The screen did not finish", (err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Arming is deliberately its own press. The screen answers whether the
+   * condition could be checked; this is the person deciding to put money behind
+   * it, and it is the moment the vault money is set aside.
+   */
+  const arm = async (id: string) => {
+    if (!address) return;
+    setBusy(id);
+    try {
+      const { client } = await wallet.getClient();
+      await api.armEventOrder(id, address, client);
+      toast.success("Armed and watching", "Roque will look for evidence on every keeper pass.");
+      orders.refresh();
+      // The vault now holds this order's money, so the panels that show a
+      // balance need to catch up rather than wait for their next tick.
+      refreshAll();
+    } catch (err) {
+      toast.error("It would not arm", (err as Error).message);
+      orders.refresh();
     } finally {
       setBusy(null);
     }
@@ -152,6 +186,7 @@ export default function EventsPage() {
                   key={o.id}
                   order={o}
                   onScreen={(id) => void screen(id)}
+                  onArm={(id) => void arm(id)}
                   onCancel={(id) => void cancel(id)}
                   busy={busy}
                 />

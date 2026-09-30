@@ -23,10 +23,19 @@
  * mapping and a redeploy, which the project's constraints rule out. What this
  * closes is the hole in the app, which is where the money actually leaves from.
  *
- * And a percentage order cannot be reserved as a number. Its size is decided at
- * fire time against whatever the balance is then, so there is no figure to hold.
- * Those rows record the share, reserve nothing, and are reported as a claim on
- * the token rather than an amount — which is the truth, and is at least visible.
+ * A percentage order is the awkward case. Its size is decided at fire time
+ * against whatever the balance is then, so there is no figure it has committed
+ * to in advance. The first cut of this recorded the share and held nothing,
+ * which turned out to be useless in exactly the case people reach for first:
+ * "spend all of my rUSDC when X happens" held nothing at all, and the vault
+ * showed the whole balance as free right up until the order tried to fill.
+ *
+ * So a share is resolved against the balance at the moment it is promised and
+ * that figure is held, with the percentage kept alongside it so the UI can say
+ * where the number came from. The fill still recomputes its own size at fire
+ * time, so nothing about what actually trades has changed. What the hold is
+ * really promising is "this much will still be here", which is the useful
+ * guarantee even when the final size is decided later.
  */
 
 import { randomUUID } from "node:crypto";
@@ -83,7 +92,16 @@ export async function reserve(legs: ReservationInput[]): Promise<void> {
   for (const leg of legs) {
     const token = requireToken(leg.token);
     const percent = leg.amountIsPercent ? Number(leg.amount) : null;
-    const raw = leg.amountIsPercent ? 0n : parseUnits(leg.amount, token.decimals);
+    let raw: bigint;
+    if (percent === null) {
+      raw = parseUnits(leg.amount, token.decimals);
+    } else {
+      // Resolve the share now, against what is free rather than the whole
+      // balance, so two "half of my rUSDC" orders promise half and then a
+      // quarter instead of both promising half of the same money.
+      const free = (await availability(leg.user, token.symbol)).available;
+      raw = (free * BigInt(Math.round(percent * 100))) / 10_000n;
+    }
     await q(
       `INSERT INTO vault_reservations
          (id, user_address, token, amount_raw, percent, source_kind, source_id, step_index, status)
@@ -154,17 +172,19 @@ export async function heldByToken(user: string): Promise<Map<string, TokenHold>>
       held.set(row.token, entry);
     }
     entry.claims += 1;
-    if (row.percent !== null) {
-      entry.percents.push(Number(row.percent));
-    } else {
-      // A malformed row must not take down a balance read, and treating it as
-      // zero is the safe direction: it under-reports the hold rather than
-      // silently blocking a withdrawal the user is entitled to make.
-      try {
-        entry.raw += BigInt(row.amount_raw);
-      } catch {
-        /* keep going */
-      }
+    // A share carries both: the figure it resolved to when it was promised, and
+    // the percentage it came from. The figure counts towards the hold like any
+    // other -- it used to be skipped, which meant a percentage order held
+    // nothing at all -- and the percentage is kept only so the UI can say where
+    // the number came from.
+    if (row.percent !== null) entry.percents.push(Number(row.percent));
+    // A malformed row must not take down a balance read, and treating it as
+    // zero is the safe direction: it under-reports the hold rather than
+    // silently blocking a withdrawal the user is entitled to make.
+    try {
+      entry.raw += BigInt(row.amount_raw);
+    } catch {
+      /* keep going */
     }
   }
   return held;

@@ -37,6 +37,7 @@ import {
   listEventOrders,
   getEventOrder,
   cancelEventOrder,
+  armEventOrder,
   eventTick,
 } from "./events.js";
 import {
@@ -544,6 +545,21 @@ export async function handleEventOrders(userRaw: string, sessionToken?: string) 
   const user = parse(address, userRaw);
   const owner = await requireAutonomousOwner(sessionToken, user);
   return { orders: await listEventOrders(owner) };
+}
+
+/**
+ * Arm a screened order. Separate from screening on purpose: the screen answers
+ * whether the condition could be checked, and this is the person deciding to put
+ * money behind it. It is also where the vault is claimed.
+ */
+export async function handleArmEventOrder(body: unknown, sessionToken?: string) {
+  const { id } = parse(idSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    return { order: await armEventOrder(id, owner) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
 }
 
 export async function handleCancelEventOrder(body: unknown, sessionToken?: string) {

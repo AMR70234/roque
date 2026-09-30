@@ -2323,6 +2323,28 @@ html, body {
   color: var(--text-faint);
 }
 .feed-tab.is-active .event-filter-count { color: var(--accent); }
+
+/* ── Money already promised ──
+   Shown next to the balance rather than subtracted from it, because a person
+   who deposited 1,000 should still see 1,000 -- with the committed part named,
+   not quietly missing. */
+.vault-bal-held {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--warning);
+}
+.vault-held-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.vault-held-note svg { flex: 0 0 auto; margin-top: 2px; color: var(--warning); }
 .events-empty {
   display: grid;
   justify-items: center;

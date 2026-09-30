@@ -19,6 +19,7 @@ import {
   tradeHistory,
 } from "./services.js";
 import { openOrders } from "./orders.js";
+import { heldByToken } from "./reservations.js";
 import { quoteSwap, poolReserves } from "./quote.js";
 import { ethUsd, allTokenUsd, tokenUsd } from "./prices.js";
 import {
@@ -353,16 +354,35 @@ export async function handleVault(userRaw: string) {
   const user = parse(address, userRaw);
   // Read every token's vaulted balance in parallel and return two symbol-keyed
   // maps: human units for display, raw strings for exact math on the client.
-  const raws = await Promise.all(
-    tokenList.map((t) => vaultBalance(user, t.address)),
-  );
+  //
+  // The held and available maps go with them, because a vault balance on its
+  // own is a misleading number once orders can rest for a fortnight: part of it
+  // is already promised to something that has not fired. Sending all three lets
+  // the panel say "600 of 1,000 free" instead of quietly offering money the app
+  // will refuse to move.
+  const [raws, held] = await Promise.all([
+    Promise.all(tokenList.map((t) => vaultBalance(user, t.address))),
+    heldByToken(user),
+  ]);
   const balances: Record<string, string> = {};
   const raw: Record<string, string> = {};
+  const heldRaw: Record<string, string> = {};
+  const availableRaw: Record<string, string> = {};
+  const claims: Record<string, number> = {};
   tokenList.forEach((t, i) => {
-    balances[t.symbol] = formatUnits(raws[i], t.decimals);
-    raw[t.symbol] = raws[i].toString();
+    const balance = raws[i];
+    const hold = held.get(t.symbol)?.raw ?? 0n;
+    // Floored at zero: a withdrawal made directly on-chain can leave claims
+    // standing against money that is gone, and a negative figure would read as
+    // a credit the vault does not have.
+    const free = balance > hold ? balance - hold : 0n;
+    balances[t.symbol] = formatUnits(balance, t.decimals);
+    raw[t.symbol] = balance.toString();
+    heldRaw[t.symbol] = hold.toString();
+    availableRaw[t.symbol] = free.toString();
+    claims[t.symbol] = held.get(t.symbol)?.claims ?? 0;
   });
-  return { balances, raw };
+  return { balances, raw, heldRaw, availableRaw, claims };
 }
 
 export async function handleActivity(userRaw: string, limit = 25) {

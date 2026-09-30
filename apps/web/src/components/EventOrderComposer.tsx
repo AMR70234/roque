@@ -78,7 +78,7 @@ export function EventOrderComposer({ onCreated }: { onCreated: (order: EventOrde
   const shortfall = written
     ? vaultShortfall(
         [{ tokenIn, tokenOut, amount, amountIsPercent: isPercent, where: "This order" }],
-        vault.data?.raw,
+        vault.data?.availableRaw,
       )
     : null;
   const ready = written && !shortfall;

@@ -10,6 +10,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { reservationStore } from "./helpers/reservations.js";
 import type { PlaybookStep } from "../src/playbooks.js";
 
 const state = vi.hoisted(() => ({
@@ -46,7 +47,9 @@ vi.mock("../src/events.js", () => ({
   EVENT_CHECK_INTERVAL_MS: 10 * 60 * 1000,
 }));
 
-const { advancePlaybook, armPlaybook, normaliseStep } = await import("../src/playbooks.js");
+const { advancePlaybook, armPlaybook, normaliseStep, cancelPlaybook } = await import(
+  "../src/playbooks.js"
+);
 
 const user = "0x1111111111111111111111111111111111111111" as const;
 const TX = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -86,8 +89,13 @@ function baseRow(steps: PlaybookStep[], over: Record<string, unknown> = {}): Row
 
 const ran = (fragment: string) => sqls.some((s) => s.replace(/\s+/gu, " ").includes(fragment));
 
+// The real reservations module runs against this, so the ledger's behaviour is
+// exercised rather than stubbed.
+let held: ReturnType<typeof reservationStore>;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  held = reservationStore();
   sqls = [];
   claimResult = [{ id: "pb-1" }];
   row = baseRow([mkStep({ kind: "immediate" })]);
@@ -125,6 +133,10 @@ beforeEach(() => {
       });
       return [{ ...row }];
     }
+    if (t.includes("SET status='cancelled'")) {
+      Object.assign(row, { status: "cancelled" });
+      return [{ ...row }];
+    }
     if (t.includes("SET status='completed'")) {
       Object.assign(row, {
         status: "completed",
@@ -148,6 +160,11 @@ beforeEach(() => {
       });
       return [{ ...row }];
     }
+    // The reservations table is real in these suites; anything it does not own
+    // falls through to the throw below.
+    const reservation = held.handle(t, params);
+    if (reservation !== null) return reservation;
+
     throw new Error(`Unhandled test query: ${t}`);
   });
 
@@ -191,7 +208,7 @@ describe("armPlaybook", () => {
     state.vaultBalance.mockResolvedValue(40_000_000n); // 40 rUSDC
 
     await expect(armPlaybook("pb-1", user)).rejects.toThrow(
-      "Step 1 needs 100 rUSDC and your vault holds 40.",
+      "Step 1 needs 100 rUSDC and your vault has 40 free.",
     );
     // Still a draft: nothing is half-armed, and the person can resize or fund it.
     expect(row.status).toBe("draft");
@@ -203,7 +220,7 @@ describe("armPlaybook", () => {
     state.vaultBalance.mockResolvedValue(150_000_000n);
 
     await expect(armPlaybook("pb-1", user)).rejects.toThrow(
-      "Step 1 and Step 2 needs 200 rUSDC and your vault holds 150.",
+      "Step 1 and Step 2 needs 200 rUSDC and your vault has 150 free.",
     );
   });
 
@@ -240,7 +257,7 @@ describe("armPlaybook", () => {
     });
     state.vaultBalance.mockResolvedValue(10_000_000n); // 10 rUSDC
 
-    await expect(armPlaybook("pb-1", user)).rejects.toThrow("your vault holds 10");
+    await expect(armPlaybook("pb-1", user)).rejects.toThrow("your vault has 10 free");
     expect(state.adjudicate).not.toHaveBeenCalled();
     expect(state.gatherEvidence).not.toHaveBeenCalled();
   });
@@ -250,7 +267,7 @@ describe("armPlaybook", () => {
     state.vaultBalance.mockResolvedValue(0n);
 
     await expect(armPlaybook("pb-1", user)).rejects.toThrow(
-      "Step 1 spends a share of your rUSDC, and your vault holds none.",
+      "Step 1 spends a share of your rUSDC, and your vault has none free.",
     );
   });
 });
@@ -410,5 +427,102 @@ describe("advancePlaybook", () => {
   it("refuses to advance a playbook that does not exist", async () => {
     state.q.mockResolvedValueOnce([]);
     await expect(advancePlaybook("nope")).rejects.toThrow("No such playbook.");
+  });
+});
+
+/**
+ * What a ladder promises the vault, and when it hands each rung back.
+ *
+ * A playbook is the harder case than a single event order, because it holds
+ * several claims at once and has to let them go one at a time. Hold too long
+ * and the rung that already traded keeps locking up money it has spent; let go
+ * too early and the rungs still to come can be withdrawn out from under.
+ */
+describe("what a playbook promises the vault", () => {
+  const openClaims = () =>
+    held.held().filter((r) => r.source_kind === "playbook").map((r) => r.step_index).sort();
+
+  /** A ladder of absolute-amount rungs, so the claims are figures not shares. */
+  const fixedStep = (amount: string, tokenIn = "rUSDC", tokenOut = "rWETH") =>
+    normaliseStep(
+      { trigger: { kind: "immediate" }, action: { tokenIn, tokenOut, amount } },
+      0,
+    );
+
+  it("claims nothing while the plan is still a draft", async () => {
+    // A draft is a plan, not an order. It can be written, shared and forked
+    // before the vault could pay for it, so it must not hold anything.
+    row = baseRow([fixedStep("100")], { status: "draft" });
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("claims every rung the vault is on the hook for when the plan is armed", async () => {
+    row = baseRow([fixedStep("100"), fixedStep("60")], { status: "draft" });
+    state.vaultBalance.mockResolvedValue(500_000_000n);
+
+    await armPlaybook("pb-1", user);
+
+    expect(openClaims()).toEqual([0, 1]);
+    const total = held.held().reduce((sum, r) => sum + BigInt(r.amount_raw), 0n);
+    expect(total).toBe(160_000_000n);
+  });
+
+  it("does not claim a rung the ladder feeds itself", async () => {
+    // Step two spends the rWETH step one bought. Holding vault rWETH for it
+    // would demand the person already own what the plan is about to acquire.
+    row = baseRow([fixedStep("100", "rUSDC", "rWETH"), fixedStep("1", "rWETH", "rUSDC")], {
+      status: "draft",
+    });
+    state.vaultBalance.mockResolvedValue(500_000_000n);
+
+    await armPlaybook("pb-1", user);
+
+    expect(openClaims()).toEqual([0]);
+  });
+
+  it("hands back only the rung that fired, keeping the rest held", async () => {
+    row = baseRow([fixedStep("100"), fixedStep("60")]);
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_kind: "playbook", source_id: "pb-1", step_index: 0 });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "60000000", source_kind: "playbook", source_id: "pb-1", step_index: 1 });
+    state.preflightVaultSwap.mockResolvedValue({ amountIn: 1n });
+    state.executeVaultSwap.mockResolvedValue(TX);
+
+    await advancePlaybook("pb-1");
+
+    expect(openClaims()).toEqual([1]);
+  });
+
+  it("hands everything back when a step fails and the plan stops", async () => {
+    row = baseRow([fixedStep("100"), fixedStep("60")]);
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_kind: "playbook", source_id: "pb-1", step_index: 0 });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "60000000", source_kind: "playbook", source_id: "pb-1", step_index: 1 });
+    state.preflightVaultSwap.mockRejectedValue(new Error("pool is dry"));
+
+    const book = await advancePlaybook("pb-1");
+
+    expect(book.status).toBe("failed");
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("hands everything back when the last rung completes the plan", async () => {
+    row = baseRow([fixedStep("100")]);
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_kind: "playbook", source_id: "pb-1", step_index: 0 });
+    state.preflightVaultSwap.mockResolvedValue({ amountIn: 1n });
+    state.executeVaultSwap.mockResolvedValue(TX);
+
+    const book = await advancePlaybook("pb-1");
+
+    expect(book.status).toBe("completed");
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("hands everything back when the person stops the plan", async () => {
+    row = baseRow([fixedStep("100"), fixedStep("60")]);
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_kind: "playbook", source_id: "pb-1", step_index: 0 });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "60000000", source_kind: "playbook", source_id: "pb-1", step_index: 1 });
+
+    await cancelPlaybook("pb-1", user);
+
+    expect(openClaims()).toHaveLength(0);
   });
 });

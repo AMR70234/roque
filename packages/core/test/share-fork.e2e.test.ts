@@ -9,6 +9,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { reservationStore } from "./helpers/reservations.js";
 import type { PlaybookStep } from "../src/playbooks.js";
 import type { EventOrderPayload, PlaybookPayload } from "../src/shares.js";
 
@@ -70,8 +71,13 @@ let share: Record<string, unknown> | undefined;
 let inserted: { table: string; params: unknown[] } | null;
 let forkBumps: string[];
 
+// The real reservations module runs against this, so the ledger's behaviour is
+// exercised rather than stubbed.
+let held: ReturnType<typeof reservationStore>;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  held = reservationStore();
   inserted = null;
   forkBumps = [];
   share = undefined;
@@ -141,6 +147,11 @@ beforeEach(() => {
       forkBumps.push(String(params[0]));
       return [];
     }
+
+    // The reservations table is real in these suites; anything it does not own
+    // falls through to the throw below.
+    const reservation = held.handle(t, params);
+    if (reservation !== null) return reservation;
 
     throw new Error(`Unhandled test query: ${t}`);
   });
@@ -231,7 +242,7 @@ describe("forkShare", () => {
       // waits, wins its verdict and then fails on a balance check.
       state.vaultBalance.mockResolvedValue(400_000_000n); // 400 rUSDC, six decimals
       await expect(forkShare(SLUG, forker)).rejects.toThrow(
-        "This order needs 1000 rUSDC and your vault holds 400.",
+        "This order needs 1000 rUSDC and your vault has 400 free.",
       );
       expect(inserted).toBeNull();
       expect(forkBumps).toEqual([]);

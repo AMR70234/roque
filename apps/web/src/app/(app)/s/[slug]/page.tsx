@@ -119,7 +119,7 @@ export default function SharePage({ params }: { params: Promise<{ slug: string }
               where: "This order",
             },
           ],
-          vault.data?.raw,
+          vault.data?.availableRaw,
         )
       : null;
 

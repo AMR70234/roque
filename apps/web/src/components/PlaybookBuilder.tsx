@@ -116,7 +116,7 @@ export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
           amountIsPercent: d.isPercent,
           where: `Step ${i + 1}`,
         })),
-        vault.data?.raw,
+        vault.data?.availableRaw,
       )
     : null;
 

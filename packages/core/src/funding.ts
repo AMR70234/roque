@@ -14,6 +14,12 @@
  * can do anything about it. The rule is deliberately the narrow one the user
  * asked for: enough for *that* trade, judged per leg, not a portfolio model.
  *
+ * What the balance means is the subtle part. A vault balance is not the same as
+ * spendable money once orders can rest for a fortnight: an armed event order has
+ * already promised part of it. So the figure this gate compares against is the
+ * balance minus everything `reservations.ts` is holding, which is what stops one
+ * deposit from backing two orders that each believe they can spend it.
+ *
  * The arithmetic is pure and the chain read is one thin wrapper over it, so the
  * interesting part — which legs the vault is even on the hook for — is testable
  * without a node.
@@ -22,6 +28,7 @@
 import { formatUnits, parseUnits } from "viem";
 import { tokenBySymbol, type TokenMeta } from "@roque/shared";
 import { vaultBalance } from "./intents.js";
+import { heldByToken } from "./reservations.js";
 
 /**
  * One trade's claim on the vault. `where` names it in the refusal: a standalone
@@ -95,14 +102,30 @@ export function vaultFundingNeeds(legs: FundingLeg[]): FundingNeed[] {
   return [...needs.values()];
 }
 
-/** The sentence a person reads when their vault is short. */
-function shortfall(need: FundingNeed, balance: bigint, token: TokenMeta): string {
+/**
+ * The sentence a person reads when their vault is short.
+ *
+ * `free` is what is actually spendable and `hold` is what resting orders have
+ * already promised. When something is held the sentence says so, because "your
+ * vault holds 600" is confusing to somebody looking at a balance of 1,000 —
+ * the missing 400 needs naming, along with how to get it back.
+ */
+function shortfall(
+  need: FundingNeed,
+  free: bigint,
+  token: TokenMeta,
+  hold: bigint,
+): string {
   const who = need.where.join(" and ");
-  const have = formatUnits(balance, token.decimals);
+  const have = formatUnits(free, token.decimals);
+  const because =
+    hold > 0n
+      ? ` ${formatUnits(hold, token.decimals)} ${token.symbol} is already committed to orders that have not fired yet; cancel one to free it.`
+      : "";
   if (need.raw === 0n) {
-    return `${who} spends a share of your ${token.symbol}, and your vault holds none. Move some ${token.symbol} into the vault on the autonomous screen first.`;
+    return `${who} spends a share of your ${token.symbol}, and your vault has none free. Move some ${token.symbol} into the vault on the autonomous screen first.${because}`;
   }
-  return `${who} needs ${formatUnits(need.raw, token.decimals)} ${token.symbol} and your vault holds ${have}. Move the difference into the vault on the autonomous screen, or trade a smaller size.`;
+  return `${who} needs ${formatUnits(need.raw, token.decimals)} ${token.symbol} and your vault has ${have} free. Move the difference into the vault on the autonomous screen, or trade a smaller size.${because}`;
 }
 
 /**
@@ -125,16 +148,23 @@ export async function assertVaultFunds(
   // and a funding gate that throws "invalid address" instead of a verdict is
   // worse than no gate.
   const owner = user.toLowerCase() as `0x${string}`;
-  const balances = await Promise.all(
-    needs.map((n) => vaultBalance(owner, requireToken(n.symbol).address)),
-  );
+  const [balances, held] = await Promise.all([
+    Promise.all(needs.map((n) => vaultBalance(owner, requireToken(n.symbol).address))),
+    heldByToken(owner),
+  ]);
 
   const problems: string[] = [];
   needs.forEach((need, i) => {
     const token = requireToken(need.symbol);
+    // Money already promised to a resting order is not money this one can
+    // spend. Floored at zero because a direct on-chain withdrawal can leave
+    // claims standing against a balance that is gone, and a negative figure
+    // here would read as credit.
+    const hold = held.get(token.symbol)?.raw ?? 0n;
     const balance = balances[i];
-    if (balance < need.raw || (need.needsSome && balance === 0n)) {
-      problems.push(shortfall(need, balance, token));
+    const free = balance > hold ? balance - hold : 0n;
+    if (free < need.raw || (need.needsSome && free === 0n)) {
+      problems.push(shortfall(need, free, token, hold));
     }
   });
 

@@ -26,6 +26,7 @@ import { adjudicate } from "./genlayer.js";
 import { preflightVaultSwap, executeVaultSwap } from "./services.js";
 import { gatherEvidence, localScreen, EVENT_CHECK_INTERVAL_MS } from "./events.js";
 import { assertVaultFunds } from "./funding.js";
+import { reserve, release } from "./reservations.js";
 
 /** How often a waiting step is re-examined. Price is cheap; events are not. */
 export const PLAYBOOK_PRICE_INTERVAL_MS = 30_000;
@@ -354,6 +355,31 @@ export async function armPlaybook(id: string, user: string): Promise<Playbook> {
     throw new Error(`This playbook waits on something nobody can verify. ${unverifiable.join(" · ")}`);
   }
 
+  // Arming is the moment the plan becomes a promise, so it is the moment the
+  // money is claimed. A draft holds nothing, which is why a plan can still be
+  // written, shared and forked before the vault could pay for it.
+  //
+  // Only the rungs the vault is on the hook for are claimed, matching the gate
+  // above: a step that spends what an earlier step bought is funded by the
+  // ladder, and holding vault money for it would double-count the same trade.
+  const produced = new Set<string>();
+  const claims: Parameters<typeof reserve>[0] = [];
+  for (const [index, step] of steps.entries()) {
+    if (!produced.has(step.action.tokenIn)) {
+      claims.push({
+        user: row.user_address,
+        token: step.action.tokenIn,
+        amount: step.action.amount,
+        amountIsPercent: step.action.amountIsPercent,
+        source: "playbook",
+        sourceId: id,
+        stepIndex: index,
+      });
+    }
+    produced.add(step.action.tokenOut);
+  }
+  if (claims.length > 0) await reserve(claims);
+
   steps[0].armedAt = new Date().toISOString();
   const armed = await q<PlaybookRow>(
     `UPDATE playbooks SET status='armed', steps=$2::jsonb, step_cursor=0, error=NULL,
@@ -466,6 +492,9 @@ export async function advancePlaybook(id: string): Promise<Playbook> {
     step.txHash = txHash;
     step.firedAt = new Date().toISOString();
     step.error = null;
+    // This rung's promise was kept. Released one rung at a time so the rest of
+    // the ladder keeps holding what it still needs.
+    await release("playbook", id, "spent", cursor);
     await log(id, cursor, "filled", step.label, txHash);
   } catch (err) {
     step.status = "failed";
@@ -476,6 +505,9 @@ export async function advancePlaybook(id: string): Promise<Playbook> {
         WHERE id=$1 RETURNING *`,
       [id, JSON.stringify(steps), step.error],
     );
+    // A failed playbook stops for good, so nothing downstream will spend. Every
+    // rung still held lets go, including the one that just failed.
+    await release("playbook", id);
     return toPlaybook(failed[0]);
   }
 
@@ -496,6 +528,10 @@ async function complete(id: string, steps: PlaybookStep[]): Promise<Playbook> {
       WHERE id=$1 RETURNING *`,
     [id, JSON.stringify(steps)],
   );
+  // Belt and braces: each rung releases as it fills, so this is normally a
+  // no-op. It catches a claim whose per-step release did not land, which would
+  // otherwise hold money against a plan that has finished running.
+  await release("playbook", id);
   await log(id, steps.length, "completed", "every step ran");
   return toPlaybook(rows[0]);
 }
@@ -567,6 +603,7 @@ export async function cancelPlaybook(id: string, user: string): Promise<Playbook
       RETURNING *`,
     [id, user],
   );
+  if (rows[0]) await release("playbook", id);
   if (!rows[0]) throw new Error("That playbook is not yours, or is already finished.");
   await log(id, rows[0].step_cursor, "cancelled", "cancelled by the owner");
   return toPlaybook(rows[0]);

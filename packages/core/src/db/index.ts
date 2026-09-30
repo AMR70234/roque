@@ -288,6 +288,57 @@ CREATE TABLE IF NOT EXISTS proposals (
   UNIQUE (user_address, dedupe_key)
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_inbox ON proposals (user_address, status, created_at DESC);
+
+-- ─────────────────────────────────────────────────────────────
+-- Reservations: vault money already promised to something
+-- ─────────────────────────────────────────────────────────────
+-- An event order or a playbook is a promise to spend from the vault days from
+-- now, and until this table existed that promise was invisible. The money sat
+-- there looking spendable: it counted as available to the next order written
+-- against it, and it could be withdrawn in full while the order it was meant
+-- to pay for was still armed and watching. Both then failed at fill time on a
+-- balance nobody had mentioned.
+--
+-- A row here is one live claim on one token. The sum of a user's open claims is
+-- the part of their vault that is spoken for, which is subtracted before a new
+-- order is allowed and before a withdrawal is signed.
+--
+-- Two things worth being honest about. First, this is a ledger and not a lock:
+-- AgentExecutor.withdraw will still pay out the whole balance to anyone who
+-- calls it directly, because the deployed contract has no idea this table
+-- exists. It closes the hole in the app, not on the chain. Second, a percentage
+-- order cannot be reserved as a number, because its size is decided at fire
+-- time against whatever the balance is then; those rows record the share and
+-- reserve nothing, and are reported as a claim on the token rather than an
+-- amount.
+CREATE TABLE IF NOT EXISTS vault_reservations (
+  id            TEXT PRIMARY KEY,
+  user_address  TEXT NOT NULL,
+  token         TEXT NOT NULL,
+  -- Absolute token units, as a decimal string, matching how the chain holds it.
+  -- Zero for a percentage claim, which reserves a share rather than a figure.
+  amount_raw    TEXT NOT NULL DEFAULT '0',
+  percent       NUMERIC,
+  -- What promised it, so releasing is keyed to the thing and not to the row.
+  source_kind   TEXT NOT NULL CHECK (source_kind IN ('event_order','playbook')),
+  source_id     TEXT NOT NULL,
+  -- Which rung of a playbook, so a ladder can release one step at a time. Zero
+  -- for an event order, which has exactly one leg. NOT NULL because the unique
+  -- constraint below depends on it: Postgres counts NULLs as distinct, so a
+  -- nullable column here would let the same promise be claimed twice.
+  step_index    INTEGER NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL DEFAULT 'held'
+                  CHECK (status IN ('held','spent','released')),
+  released_at   TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- One claim per rung per source. Arming a playbook twice, or a keeper running
+  -- twice over the same order, must not double-count the same promise.
+  UNIQUE (source_kind, source_id, step_index)
+);
+CREATE INDEX IF NOT EXISTS idx_vault_res_held
+  ON vault_reservations (user_address, token, status);
+CREATE INDEX IF NOT EXISTS idx_vault_res_source
+  ON vault_reservations (source_kind, source_id);
 `;
 
 /** Create every table if it is not already there. Safe to call on each boot. */

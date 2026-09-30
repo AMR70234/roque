@@ -151,13 +151,20 @@ the deployed Sepolia contracts.
   accepted proposal into a real order or playbook;
 - `funding.ts` decides what the vault must already hold for a set of legs to be
   payable, and refuses a commitment it cannot cover. The arithmetic is pure and
-  the chain read is a thin wrapper over it.
+  the chain read is a thin wrapper over it. What it compares against is the
+  balance minus everything currently reserved, not the raw balance;
+- `reservations.ts` records the vault money a resting commitment has already
+  promised, so the same deposit cannot back two orders and cannot be withdrawn
+  out from under the order waiting to spend it. A ledger, not a lock: the
+  deployed `AgentExecutor` has no locked-balance concept, so a direct
+  `withdraw` call still pays out in full. It closes the app's path, which is
+  where money actually leaves.
 
 The database stores interpretation and execution activity, not custody. Stored
 autonomous intents are owner-checked and atomically claimed before signing to
 prevent duplicate execution requests.
 
-The judgment features add five append-only tables: `event_orders`, `playbooks`,
+The judgment features add six append-only tables: `event_orders`, `playbooks`,
 `playbook_events`, `shares`, and `proposals`. They hold intent and reasoning,
 never balances. Concurrency is handled the same way as intents: a playbook step
 is claimed with a conditional update (`WHERE step_cursor=$3 AND status='armed'
@@ -240,24 +247,31 @@ Both modes use the same on-chain authorization.
    before verifiability, because a consensus round is the expensive refusal and
    this is the cheap one. The read fails closed: an unreadable balance is not
    consent.
-3. A local pattern screen refuses the obviously unanswerable (feelings, private
+3. The same moment writes a reservation, so the money is promised as well as
+   checked. Open claims are subtracted from the balance the next commitment is
+   judged against, and from the amount the vault panel will withdraw, which is
+   what stops one deposit backing two orders or being taken back while an order
+   waits on it. Claims are released on every exit -- filled, refused, expired,
+   cancelled, failed for good -- and a ladder releases one rung at a time, so a
+   rung that has traded stops holding what it spent. Drafts hold nothing.
+4. A local pattern screen refuses the obviously unanswerable (feelings, private
    matters, predictions) without spending a validator round trip.
-4. The judgment worker screens surviving conditions through GenLayer. The order
+5. The judgment worker screens surviving conditions through GenLayer. The order
    becomes `armed` with its sources recorded, or `rejected` with a reason. A
    screening call that fails leaves the row in `screening` to be retried, since a
    failure to ask is not a verdict.
-5. While armed, the worker gathers evidence and adjudicates on the check
+6. While armed, the worker gathers evidence and adjudicates on the check
    interval. A `met` verdict at high or medium confidence executes through the
    same `AgentExecutor` path as any autonomous trade, so the user's signed caps,
    slippage gate, and expiry apply unchanged. Low confidence is recorded and
    does not fill.
-6. Playbooks advance one step per pass, in order, and a step's own trigger
+7. Playbooks advance one step per pass, in order, and a step's own trigger
    (immediate, price, delay, or event) decides readiness. A failed fill fails
    the playbook rather than skipping ahead.
-7. Publishing writes a `shares` row; forking re-validates every stored step
+8. Publishing writes a `shares` row; forking re-validates every stored step
    against the current token registry, records `source_slug`, and sizes the
    position against the forker's own vault.
-8. The proposals worker snapshots each active vault and derives proposals
+9. The proposals worker snapshots each active vault and derives proposals
    (`capability-expiring`, `rejected-condition`, `far-trigger`,
    `drawdown-ladder`, `rally-trim`, `idle-vault`). Bucketed dedupe keys keep a
    drifting price from refiling the same idea. Accepting one creates an ordinary

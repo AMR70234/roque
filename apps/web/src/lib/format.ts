@@ -76,3 +76,41 @@ export function formatDuration(seconds: number): string {
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
 }
+
+/**
+ * A friendly relative time, future tense, for a deadline that has not arrived.
+ *
+ * `timeAgo` is the wrong tool for an expiry and quietly lies about one: it
+ * clamps a future timestamp to zero seconds, so every date still to come reads
+ * "just now". This is the mirror of it. Near deadlines read as a countdown,
+ * because that is what a person wants from something about to lapse; anything
+ * further out than a week reads as the calendar date, because "in 63 days" is
+ * harder to act on than "on Dec 2".
+ */
+export function timeUntil(input: string | number | Date): string {
+  const then = new Date(input).getTime();
+  if (!Number.isFinite(then)) return "";
+  const secs = Math.floor((then - Date.now()) / 1000);
+  if (secs <= 0) return "expired";
+  if (secs < 60) return "in under a minute";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `in ${mins} ${mins === 1 ? "minute" : "minutes"}`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `in ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  const days = Math.round(hours / 24);
+  if (days <= 7) return `in ${days} ${days === 1 ? "day" : "days"}`;
+  return `on ${new Date(input).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+}
+
+/** The exact moment, spelled out, for a tooltip behind a relative label. */
+export function exactTime(input: string | number | Date): string {
+  const then = new Date(input);
+  if (!Number.isFinite(then.getTime())) return "";
+  return then.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}

@@ -125,6 +125,25 @@ export {
   type ShareKind,
   type ForkResult,
 } from "./shares.js";
+// Which vault money is already promised, and so cannot be promised twice or
+// withdrawn out from under the order that is waiting to spend it.
+export {
+  reserve,
+  release,
+  heldByToken,
+  availability,
+  assertWithdrawable,
+  type ReservationSource,
+  type ReservationInput,
+  type TokenHold,
+  type TokenAvailability,
+} from "./reservations.js";
+export {
+  vaultFundingNeeds,
+  assertVaultFunds,
+  type FundingLeg,
+  type FundingNeed,
+} from "./funding.js";
 export {
   generateProposals,
   listProposals,

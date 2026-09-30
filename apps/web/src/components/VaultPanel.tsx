@@ -13,11 +13,24 @@
  * name the size either in tokens or in dollars. The dollar figure is converted
  * to a token amount against the same Chainlink price the rest of the app quotes,
  * so what they type is what the executor will value it at.
+ *
+ * Withdrawing has one more rule than depositing, and it is the interesting one.
+ * A balance in here is not all spendable: an armed event order or a running
+ * playbook has already promised part of it, days before the trade will happen.
+ * So the panel shows the committed part separately and will not sign a
+ * withdrawal that dips into it, because the alternative is an order that arms,
+ * waits a fortnight, gets its verdict and then fails on money that was quietly
+ * taken back.
+ *
+ * The honest caveat: this is the app refusing, not the chain. AgentExecutor has
+ * no notion of a locked balance, so a person determined to call withdraw on
+ * Etherscan can still empty the vault and strand their own orders. Fixing that
+ * properly needs a contract change; this fixes the path everybody actually uses.
  */
 
 import { useMemo, useState } from "react";
-import { parseUnits } from "viem";
-import { ArrowDownToLine, ArrowUpFromLine, Vault, Wallet } from "lucide-react";
+import { formatUnits, parseUnits } from "viem";
+import { ArrowDownToLine, ArrowUpFromLine, Lock, Vault, Wallet } from "lucide-react";
 import { tokenList, requireToken } from "@roque/shared";
 import type { VaultResult } from "@/lib/types";
 import { useWallet } from "@/lib/useWallet";
@@ -58,6 +71,27 @@ export function VaultPanel({
   const walletBalances = balances.data ?? {};
   const walletBal = Number(walletBalances[token] ?? 0);
   const price = Number(prices[token] ?? 0);
+
+  // What resting orders have promised, for the token on screen. Read as exact
+  // raw units because the comparison below decides whether a signature happens,
+  // and a float rounding the wrong way would either block a legal withdrawal or
+  // wave through an illegal one.
+  const meta = requireToken(token);
+  const heldRaw = (() => {
+    try {
+      return BigInt(vault?.heldRaw?.[token] ?? "0");
+    } catch {
+      return 0n;
+    }
+  })();
+  const availableRaw = (() => {
+    try {
+      return BigInt(vault?.availableRaw?.[token] ?? "0");
+    } catch {
+      return 0n;
+    }
+  })();
+  const claims = vault?.claims?.[token] ?? 0;
 
   // The token-denominated amount the buttons act on, derived from what was typed
   // and the unit it was typed in. A dollar figure is divided by the live price.
@@ -108,6 +142,24 @@ export function VaultPanel({
       }
       return;
     }
+    // Refuse before the wallet prompt rather than after. A person who has
+    // already approved a transaction cannot be told the app changed its mind.
+    if (direction === "withdraw" && heldRaw > 0n) {
+      let want: bigint;
+      try {
+        want = parseUnits(human, meta.decimals);
+      } catch {
+        want = 0n;
+      }
+      if (want > availableRaw) {
+        toast.info(
+          "That much is committed",
+          `${formatAmount(formatUnits(heldRaw, meta.decimals))} ${token} is promised to ${claims} live order${claims === 1 ? "" : "s"}, so ${formatAmount(formatUnits(availableRaw, meta.decimals))} is free. Cancel an order to free the rest.`,
+        );
+        return;
+      }
+    }
+
     setBusy(direction);
     const verb = direction === "deposit" ? "Depositing" : "Withdrawing";
     const pending = toast.push({
@@ -154,15 +206,28 @@ export function VaultPanel({
       </header>
 
       <div className="vault-balances">
-        {shown.map((t) => (
-          <div key={t.symbol} className="vault-bal">
-            <TokenIcon symbol={t.symbol} size={22} />
-            <span className="tabular">
-              {loading && !vault ? "—" : formatAmount(vaultBalances[t.symbol] ?? 0)}
-            </span>
-            <span className="vault-bal-sym">{t.symbol}</span>
-          </div>
-        ))}
+        {shown.map((t) => {
+          const hold = vault?.heldRaw?.[t.symbol];
+          const committed = hold && hold !== "0";
+          return (
+            <div key={t.symbol} className="vault-bal">
+              <TokenIcon symbol={t.symbol} size={22} />
+              <span className="tabular">
+                {loading && !vault ? "—" : formatAmount(vaultBalances[t.symbol] ?? 0)}
+              </span>
+              <span className="vault-bal-sym">{t.symbol}</span>
+              {committed ? (
+                <span
+                  className="vault-bal-held"
+                  title={`Promised to ${vault?.claims?.[t.symbol] ?? 0} live order(s) and not withdrawable until they close`}
+                >
+                  <Lock size={10} />
+                  {formatAmount(formatUnits(BigInt(hold), requireToken(t.symbol).decimals))}
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
 
       <div className="vault-form">
@@ -211,6 +276,17 @@ export function VaultPanel({
           </div>
           {equiv ? <span className="vault-equiv tabular">≈ {equiv}</span> : null}
         </div>
+
+        {heldRaw > 0n ? (
+          <p className="vault-held-note">
+            <Lock size={12} />
+            <span>
+              {formatAmount(formatUnits(heldRaw, meta.decimals))} {token} is committed to{" "}
+              {claims} live order{claims === 1 ? "" : "s"}.{" "}
+              {formatAmount(formatUnits(availableRaw, meta.decimals))} is free to withdraw.
+            </span>
+          </p>
+        ) : null}
 
         <div className="vault-wallet">
           <span className="vault-wallet-label">

@@ -72,6 +72,16 @@ export interface VaultResult {
   // Human-unit balances and exact raw strings, both keyed by token symbol.
   balances: Record<string, string>;
   raw: Record<string, string>;
+  /**
+   * What resting orders have already promised, and what is left after them.
+   * A vault balance on its own overstates what can be spent: an armed event
+   * order or a running playbook has claimed part of it, and that part cannot
+   * back a second order or be withdrawn while the first is still live.
+   */
+  heldRaw: Record<string, string>;
+  availableRaw: Record<string, string>;
+  /** How many live orders are holding each token, for the sentence in the UI. */
+  claims: Record<string, number>;
 }
 
 /** A single pool's reserves, mirroring PoolReserves from the quote layer. */

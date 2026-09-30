@@ -24,6 +24,7 @@ import { q } from "./db/index.js";
 import { ethUsd } from "./prices.js";
 import { preflightVaultSwap, executeVaultSwap } from "./services.js";
 import { assertVaultFunds } from "./funding.js";
+import { reserve, release } from "./reservations.js";
 
 /**
  * How long an armed order waits between verdicts. A GenLayer adjudication is a
@@ -399,7 +400,23 @@ export async function createEventOrder(input: CreateEventOrderInput): Promise<Ev
       input.sourceSlug ?? null,
     ],
   );
-  return toEventOrder(rows[0]);
+  const order = toEventOrder(rows[0]);
+
+  // The money is now promised. Reserved after the insert rather than before,
+  // because the claim is keyed to the order id and there is no id until the row
+  // exists; a crash between the two leaves an order holding nothing, which the
+  // funding gate treats as unfunded and is the safe direction to fail in.
+  await reserve([
+    {
+      user: order.user,
+      token: tokenIn.symbol,
+      amount,
+      amountIsPercent: input.amountIsPercent ?? false,
+      source: "event_order",
+      sourceId: order.id,
+    },
+  ]);
+  return order;
 }
 
 /**
@@ -479,6 +496,9 @@ async function reject(
       WHERE id=$1 RETURNING *`,
     [id, reason, confidence, sources ? JSON.stringify(sources) : null],
   );
+  // A refused order will never trade, so its claim on the vault ends here
+  // rather than sitting held forever against an order nobody can arm.
+  await release("event_order", id);
   return toEventOrder(rows[0]);
 }
 
@@ -503,6 +523,7 @@ export async function evaluateEventOrder(id: string): Promise<EventOrder> {
         WHERE id=$1 AND status='armed' RETURNING *`,
       [id],
     );
+    await release("event_order", id);
     return toEventOrder(done[0] ?? row);
   }
 
@@ -556,6 +577,10 @@ async function fill(row: EventOrderRow): Promise<EventOrder> {
         WHERE id=$1 AND status='armed' RETURNING *`,
       [row.id, txHash],
     );
+    // The promise was kept, so the claim is spent rather than released. The
+    // money has genuinely left the vault by now and the on-chain balance
+    // already reflects that; holding it twice would under-report what is free.
+    await release("event_order", row.id, "spent");
     return toEventOrder(done[0] ?? row);
   } catch (err) {
     const message = (err as Error).message;
@@ -569,6 +594,9 @@ async function fill(row: EventOrderRow): Promise<EventOrder> {
         WHERE id=$1 RETURNING *`,
       [row.id, message, keepTrying ? "armed" : "failed"],
     );
+    // Only once the order has really given up. While it is still retrying the
+    // money stays held, because the next attempt will need it.
+    if (!keepTrying) await release("event_order", row.id);
     return toEventOrder(done[0] ?? row);
   }
 }
@@ -599,6 +627,7 @@ export async function cancelEventOrder(id: string, user: string): Promise<EventO
     [id, user],
   );
   if (!rows[0]) throw new Error("That order is not yours, or is no longer open.");
+  await release("event_order", id);
   return toEventOrder(rows[0]);
 }
 
@@ -659,6 +688,15 @@ export async function eventTick(): Promise<EventTickResult> {
       WHERE status='armed' AND expires_at IS NOT NULL AND expires_at <= now()
       RETURNING id`,
   );
+  // This sweep never goes through evaluateEventOrder, so it has to let the
+  // claims go itself, or money stays held against an order that has lapsed.
+  for (const { id } of expired) {
+    try {
+      await release("event_order", id);
+    } catch (err) {
+      result.errors.push(`release ${id}: ${(err as Error).message}`);
+    }
+  }
   if (expired.length > 0) result.evaluated += expired.length;
 
   return result;

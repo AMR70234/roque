@@ -102,7 +102,7 @@ export function PlaybookCard({
             amountIsPercent: s.action.amountIsPercent,
             where: `Step ${i + 1}`,
           })),
-          vault.data?.raw,
+          vault.data?.availableRaw,
         )
       : null;
 

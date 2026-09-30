@@ -3,16 +3,25 @@
 /**
  * A small read-only chat under the inbox. It answers questions about things the
  * app already has in hand: live prices, your balances, your vault, your recent
- * trades, and your open orders. It never suggests a trade and never calls the
- * agent, so there is nothing here that can sign or spend. Anything that asks
- * for advice or a prediction gets a plain refusal instead of an opinion.
+ * trades, your open orders, and the two judgment surfaces — the event orders you
+ * are watching and the playbooks the keeper is walking. It never suggests a trade
+ * and never calls the agent, so there is nothing here that can sign or spend.
+ * Anything that asks for advice or a prediction gets a plain refusal instead of
+ * an opinion.
+ *
+ * Every answer is still assembled here from data already polled, with no round
+ * trip: a question is matched against the patterns below and answered from the
+ * shared store. That is the whole design, and the reason the reply is instant.
+ * The event and playbook rows come from `AppData` for the same reason the prices
+ * do — their own screens already poll them, so the chat reads the same copy
+ * rather than opening its own.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, MessageCircle, Trash2 } from "lucide-react";
 import { tokenList } from "@roque/shared";
 import { useAppData } from "@/providers/AppData";
-import { formatAmount, formatUsd, formatPrice } from "@/lib/format";
+import { formatAmount, formatUsd, formatPrice, timeUntil } from "@/lib/format";
 
 type Line = { id: number; from: "you" | "roque"; text: string };
 type Row = { symbol: string; amount: number; usd: number };
@@ -56,6 +65,13 @@ const BIGGEST =
 const SMALLEST =
   /\b(smallest|lowest|least)\b.*\b(holding|position|asset|token|coin)s?\b|\bwhat do i (hold|own|have) (the )?least\b/i;
 const BREAKDOWN = /\b(breakdown|allocation|distribution|split|composition|diversification|diversified)\b/i;
+// Tested ahead of ORDERS on purpose: "event orders" contains "orders", so the
+// looser pattern would answer an event question with the limit-order list.
+const EVENTS =
+  /\b(event|events|event orders?|condition|conditions|watching|watch list|watchlist)\b/i;
+const PLAYBOOKS = /\b(playbook|playbooks|plan|plans|ladder|steps?)\b/i;
+const PROPOSALS = /\b(proposals?|inbox|suggestions?)\b/i;
+const EXPIRY = /\b(expir\w*|run out|running out|lapse|deadline|how long)\b/i;
 const ORDERS = /\borders?\b/i;
 const TRADES = /\b(trade|trades|activity|history|recent)\b/i;
 const HOLD = /\b(do i|i have|i hold|i own|my|mine|balance)\b/i;
@@ -67,9 +83,9 @@ const MARKET = /\b(price|prices|market|how much is)\b/i;
 const NO_WALLET = "I cannot see your wallet yet. Connect one and try again.";
 const REFUSAL = "I can show you prices and what you hold, but I will not tell you what to do with them.";
 const HINT =
-  "Ask me about prices, your wallet, your vault, your open orders, or your recent trades. For example: \"price of ETH\" or \"what is my portfolio worth\".";
+  "Ask me about prices, your wallet, your vault, your open orders, your recent trades, your event orders or your playbooks. For example: \"price of ETH\", \"what am I watching\" or \"what is my portfolio worth\".";
 const HELP_TEXT =
-  "I can answer: a token's price (\"price of btc\"), a comparison (\"eth vs btc\"), the most or least expensive token, your wallet balances and total, your biggest or smallest holding, your allocation breakdown, your vault, your open orders, and your recent trades. I do not give trading advice.";
+  "I can answer: a token's price (\"price of btc\"), a comparison (\"eth vs btc\"), the most or least expensive token, your wallet balances and total, your biggest or smallest holding, your allocation breakdown, your vault, your open orders, your recent trades, the event orders you are watching (\"what am I watching\", \"when does my event order expire\"), your playbooks and the step each one is on, and what is waiting in your inbox. I do not give trading advice.";
 
 // Extra names people use for a token, on top of its symbol with and without the r.
 const ALIASES: Record<string, string[]> = {
@@ -114,10 +130,15 @@ function symbolOf(addressOrSymbol: string): string {
 const sum = (rows: Row[]) => rows.reduce((s, r) => s + r.usd, 0);
 
 export function InboxChat() {
-  const { prices, ethUsd, balances, vault, activity, orders } = useAppData();
+  const { prices, ethUsd, balances, vault, activity, orders, eventOrders, playbooks, proposals } =
+    useAppData();
   const [lines, setLines] = useState<Line[]>([]);
   const [value, setValue] = useState("");
   const idRef = useRef(0);
+  const logRef = useRef<HTMLDivElement>(null);
+  // Set on the first paint of a restored conversation, so coming back to the tab
+  // lands at the bottom without animating through a fortnight of history.
+  const jumpedRef = useRef(false);
 
   // Restore the conversation once on mount, so switching tabs and coming back
   // does not lose it. The component's own state resets on unmount; the saved
@@ -149,8 +170,23 @@ export function InboxChat() {
     }
   }, [lines]);
 
+  // Follow the conversation. The log is its own scroll box rather than the page,
+  // so this scrolls that element and never moves the page out from under someone
+  // reading the inbox above it. Reply and question land in the same state update,
+  // which is why one effect keyed on the whole list is enough.
+  useEffect(() => {
+    const log = logRef.current;
+    if (!log || lines.length === 0) return;
+    // The restored conversation should already be at the bottom when it appears;
+    // only a new turn is worth animating.
+    const behavior = jumpedRef.current ? "smooth" : "auto";
+    jumpedRef.current = true;
+    log.scrollTo({ top: log.scrollHeight, behavior });
+  }, [lines]);
+
   const clear = () => {
     setLines([]);
+    jumpedRef.current = false;
     try {
       window.localStorage.removeItem(STORAGE_KEY);
     } catch {
@@ -198,6 +234,100 @@ export function InboxChat() {
     if (GREETING.test(text)) return `Hey. ${HINT}`;
     if (ADVICE.test(lower)) return REFUSAL;
     if (HELP.test(lower)) return HELP_TEXT;
+
+    // ── The judgment surfaces ──────────────────────────────────
+    // Both read the same shared rows their own screens do, so an answer here
+    // and the card on /events can never disagree.
+
+    if (EVENTS.test(lower)) {
+      const list = eventOrders.data;
+      if (!list) return "I cannot read your event orders yet.";
+      if (list.length === 0) {
+        return "You have no event orders. The events screen is where you write one.";
+      }
+      const armed = list.filter((o) => o.status === "armed");
+      const screening = list.filter((o) => o.status === "screening");
+      const refused = list.filter((o) => o.status === "rejected");
+      const filled = list.filter((o) => o.status === "filled");
+
+      // "When does it run out" is a different question from "what is it", so it
+      // gets the deadline rather than the condition.
+      if (EXPIRY.test(lower)) {
+        const dated = armed.filter((o) => o.expiresAt);
+        if (dated.length === 0) return "None of your live event orders carry an expiry date.";
+        const lines = dated
+          .slice(0, 3)
+          .map((o) => `"${o.condition}" expires ${timeUntil(o.expiresAt as string)}`);
+        const more = dated.length > 3 ? ` (${dated.length - 3} more not shown)` : "";
+        return `${lines.join("; ")}${more}.`;
+      }
+
+      const parts: string[] = [];
+      if (armed.length > 0) {
+        const conditions = armed.slice(0, 3).map((o) => {
+          const size = o.amountIsPercent
+            ? `${o.amount}% of ${o.tokenIn}`
+            : `${formatAmount(o.amount)} ${o.tokenIn}`;
+          return `"${o.condition}" then ${size} to ${o.tokenOut}`;
+        });
+        const more = armed.length > 3 ? ` (${armed.length - 3} more not shown)` : "";
+        parts.push(
+          `You are watching ${armed.length} condition${armed.length === 1 ? "" : "s"}: ${conditions.join("; ")}${more}.`,
+        );
+      } else {
+        parts.push("Nothing is armed and watching right now.");
+      }
+      // The refusals are the honest part of this feature, so they are counted
+      // rather than quietly left out of the summary.
+      const tail: string[] = [];
+      if (screening.length > 0) tail.push(`${screening.length} waiting to be screened`);
+      if (refused.length > 0) tail.push(`${refused.length} refused as unverifiable`);
+      if (filled.length > 0) tail.push(`${filled.length} already filled`);
+      if (tail.length > 0) parts.push(`Also ${tail.join(", ")}.`);
+      return parts.join(" ");
+    }
+
+    if (PLAYBOOKS.test(lower)) {
+      const list = playbooks.data;
+      if (!list) return "I cannot read your playbooks yet.";
+      if (list.length === 0) {
+        return "You have no playbooks. The playbooks screen is where you write one.";
+      }
+      const armed = list.filter((p) => p.status === "armed");
+      const drafts = list.filter((p) => p.status === "draft");
+      const done = list.filter((p) => p.status === "completed");
+      if (armed.length === 0) {
+        const bits = [
+          drafts.length > 0 ? `${drafts.length} draft${drafts.length === 1 ? "" : "s"}` : null,
+          done.length > 0 ? `${done.length} completed` : null,
+        ].filter((b): b is string => b !== null);
+        return bits.length > 0
+          ? `Nothing is running. You have ${bits.join(" and ")}.`
+          : "None of your playbooks are running.";
+      }
+      const lines = armed.slice(0, 3).map((p) => {
+        const total = p.steps.length;
+        // The cursor is zero-based; a person counts steps from one.
+        const at = Math.min(p.stepCursor + 1, total);
+        return `"${p.name}" is on step ${at} of ${total}`;
+      });
+      const more = armed.length > 3 ? ` (${armed.length - 3} more not shown)` : "";
+      const draftPart =
+        drafts.length > 0
+          ? ` You also have ${drafts.length} draft${drafts.length === 1 ? "" : "s"} not yet armed.`
+          : "";
+      return `${lines.join("; ")}${more}.${draftPart}`;
+    }
+
+    if (PROPOSALS.test(lower)) {
+      const list = proposals.data;
+      if (!list) return "I cannot read your inbox yet.";
+      const open = list.filter((p) => p.status === "new");
+      if (open.length === 0) return "Nothing is waiting in your inbox.";
+      const titles = open.slice(0, 3).map((p) => p.title);
+      const more = open.length > 3 ? ` (${open.length - 3} more not shown)` : "";
+      return `You have ${open.length} proposal${open.length === 1 ? "" : "s"} waiting: ${titles.join("; ")}${more}.`;
+    }
 
     if (ORDERS.test(lower)) {
       const list = orders.data?.orders;
@@ -341,7 +471,7 @@ export function InboxChat() {
           </button>
         ) : null}
       </header>
-      <div className="inbox-chat-log">
+      <div className="inbox-chat-log" ref={logRef}>
         {lines.length === 0 ? <p className="panel-empty">{HINT}</p> : null}
         {lines.map((l) => (
           <p key={l.id} className={`inbox-chat-line inbox-chat-${l.from}`}>

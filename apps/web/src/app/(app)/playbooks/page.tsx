@@ -11,34 +11,21 @@
 import { useState } from "react";
 import { ListOrdered, RefreshCw } from "lucide-react";
 import { useAppData } from "@/providers/AppData";
-import { usePoll } from "@/lib/hooks";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
 import { VaultFundedNotice } from "@/components/VaultFundedNotice";
 import { PlaybookBuilder } from "@/components/PlaybookBuilder";
 import { PlaybookCard } from "@/components/PlaybookCard";
-import type { Playbook } from "@/lib/types";
-
-const POLL_MS = 15_000;
 
 export default function PlaybooksPage() {
-  const { address, wallet, sessionReady, refreshAll } = useAppData();
+  // Shared poll, for the same reason the events screen uses one: the inbox chat
+  // reads these rows too, and one list should not be fetched twice.
+  const { address, wallet, sessionReady, refreshAll, playbooks: books } = useAppData();
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
 
   const live = address && sessionReady;
-  const books = usePoll<Playbook[]>(
-    live
-      ? async () => {
-          const { client } = await wallet.getClient();
-          const res = await api.playbooks(address, client);
-          return res.playbooks;
-        }
-      : null,
-    POLL_MS,
-    [address, sessionReady],
-  );
 
   const arm = async (id: string) => {
     if (!address) return;

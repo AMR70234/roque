@@ -14,6 +14,11 @@
  *
  * When the vault has not loaded yet this says nothing at all. Blocking a button
  * on a number we do not have would be worse than letting the server answer.
+ *
+ * What it compares against is `availableRaw` rather than the plain balance, for
+ * the same reason the server does: an armed event order has already promised
+ * part of the vault, and money promised twice is money one of the two orders
+ * will not get.
  */
 
 import { formatUnits, parseUnits } from "viem";
@@ -28,7 +33,10 @@ export interface FundingLeg {
   where: string;
 }
 
-/** Raw vault balances keyed by symbol — `VaultResult.raw`, straight from the poll. */
+/**
+ * Spendable vault balances keyed by symbol. Pass `VaultResult.availableRaw`,
+ * which is the balance with every resting order's claim already taken out.
+ */
 export type VaultRaw = Record<string, string> | undefined;
 
 function safeParse(amount: string, decimals: number): bigint | null {

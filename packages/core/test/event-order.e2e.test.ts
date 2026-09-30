@@ -9,6 +9,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { reservationStore } from "./helpers/reservations.js";
 
 const state = vi.hoisted(() => ({
   q: vi.fn(),
@@ -35,9 +36,8 @@ vi.mock("../src/prices.js", () => ({
   usdValueRaw: vi.fn(),
 }));
 
-const { createEventOrder, screenEventOrder, evaluateEventOrder } = await import(
-  "../src/events.js"
-);
+const { createEventOrder, screenEventOrder, evaluateEventOrder, cancelEventOrder } =
+  await import("../src/events.js");
 
 const user = "0x1111111111111111111111111111111111111111" as const;
 const CHECKABLE = "the Federal Reserve cuts its benchmark interest rate";
@@ -91,8 +91,17 @@ function baseRow(over: Record<string, unknown> = {}): Row {
 
 const ran = (fragment: string) => sqls.some((s) => s.replace(/\s+/gu, " ").includes(fragment));
 
+/** A row that has already passed its screen, which is where a fill starts. */
+const armed = (over: Record<string, unknown> = {}) =>
+  baseRow({ status: "armed", screen_verdict: "verifiable", ...over });
+
+// The real reservations module runs against this, so the ledger's behaviour is
+// exercised rather than stubbed.
+let held: ReturnType<typeof reservationStore>;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  held = reservationStore();
   row = baseRow();
   sqls = [];
 
@@ -164,10 +173,19 @@ beforeEach(() => {
       Object.assign(row, { status: "filled", tx_hash: params[1], error: null });
       return [{ ...row }];
     }
+    if (t.includes("SET status='cancelled'")) {
+      Object.assign(row, { status: "cancelled" });
+      return [{ ...row }];
+    }
     if (t.includes("SET status=$3, error=$2")) {
       Object.assign(row, { status: params[2], error: params[1] });
       return [{ ...row }];
     }
+    // The reservations table is real in these suites; anything it does not own
+    // falls through to the throw below.
+    const reservation = held.handle(t, params);
+    if (reservation !== null) return reservation;
+
     throw new Error(`Unhandled test query: ${t}`);
   });
 
@@ -211,7 +229,7 @@ describe("createEventOrder", () => {
     state.vaultBalance.mockResolvedValue(40_000_000n); // 40 rUSDC
 
     await expect(createEventOrder(draft)).rejects.toThrow(
-      "This order needs 100 rUSDC and your vault holds 40.",
+      "This order needs 100 rUSDC and your vault has 40 free.",
     );
     expect(ran("INSERT INTO event_orders")).toBe(false);
   });
@@ -221,7 +239,7 @@ describe("createEventOrder", () => {
 
     await expect(
       createEventOrder({ ...draft, amount: "25", amountIsPercent: true }),
-    ).rejects.toThrow("This order spends a share of your rUSDC, and your vault holds none.");
+    ).rejects.toThrow("This order spends a share of your rUSDC, and your vault has none free.");
   });
 
   it("takes a percentage order against a vault that holds something", async () => {
@@ -335,8 +353,6 @@ describe("screenEventOrder", () => {
 });
 
 describe("evaluateEventOrder", () => {
-  const armed = (over: Record<string, unknown> = {}) =>
-    baseRow({ status: "armed", screen_verdict: "verifiable", ...over });
 
   it("expires an order that ran out its clock, without asking anyone", async () => {
     row = armed({ expires_at: "2026-01-01T00:00:00.000Z" });
@@ -443,5 +459,102 @@ describe("evaluateEventOrder", () => {
 
     expect(order.status).toBe("cancelled");
     expect(state.adjudicate).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The claim on the vault, followed through the order's whole life.
+ *
+ * The module's own behaviour is covered in vault-reservations.test.ts. What is
+ * checked here is the wiring, which is the part that actually breaks: a hold
+ * taken and never let go is money locked up for nothing, and every one of these
+ * exits used to leave it standing.
+ */
+describe("what an event order promises the vault", () => {
+  const openClaims = () => held.held().filter((r) => r.source_kind === "event_order");
+
+  it("claims the amount the moment the order is written", async () => {
+    state.vaultBalance.mockResolvedValue(500_000_000n);
+
+    const order = await createEventOrder({
+      user,
+      condition: CHECKABLE,
+      tokenIn: "rUSDC",
+      tokenOut: "rWETH",
+      amount: "100",
+    });
+
+    const claims = openClaims();
+    expect(claims).toHaveLength(1);
+    expect(claims[0].source_id).toBe(order.id);
+    expect(claims[0].amount_raw).toBe("100000000");
+  });
+
+  it("lets the claim go when the condition turns out to be uncheckable", async () => {
+    // A refused order can never trade, so holding its money would lock up a
+    // balance against something nobody is allowed to arm.
+    row = baseRow({ condition: "my neighbour's cat comes home" });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_id: "ev-1" });
+
+    await screenEventOrder("ev-1");
+
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("marks the claim spent once the trade actually lands", async () => {
+    row = armed({ verdict_met: true });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_id: "ev-1" });
+    state.preflightVaultSwap.mockResolvedValue({ amountIn: 1n });
+    state.executeVaultSwap.mockResolvedValue(TX);
+
+    await evaluateEventOrder("ev-1");
+
+    expect(openClaims()).toHaveLength(0);
+    expect(held.rows[0].status).toBe("spent");
+  });
+
+  it("keeps holding while a fill is still worth retrying", async () => {
+    // The next attempt will need the money, so letting go here would refuse the
+    // retry the order is entitled to.
+    row = armed({ verdict_met: true, checks: 0 });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_id: "ev-1" });
+    state.preflightVaultSwap.mockResolvedValue({ amountIn: 1n });
+    state.executeVaultSwap.mockRejectedValue(new Error("fetch failed"));
+
+    const order = await evaluateEventOrder("ev-1");
+
+    expect(order.status).toBe("armed");
+    expect(openClaims()).toHaveLength(1);
+  });
+
+  it("lets go once the order has given up for good", async () => {
+    row = armed({ verdict_met: true, checks: 2 });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_id: "ev-1" });
+    state.preflightVaultSwap.mockResolvedValue({ amountIn: 1n });
+    state.executeVaultSwap.mockRejectedValue(new Error("fetch failed"));
+
+    const order = await evaluateEventOrder("ev-1");
+
+    expect(order.status).toBe("failed");
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("lets go when the order runs out its clock", async () => {
+    row = armed({ expires_at: "2020-01-01T00:00:00.000Z" });
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_id: "ev-1" });
+
+    const order = await evaluateEventOrder("ev-1");
+
+    expect(order.status).toBe("expired");
+    expect(openClaims()).toHaveLength(0);
+  });
+
+  it("lets go when the person calls the order off", async () => {
+    row = armed();
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: "100000000", source_id: "ev-1" });
+
+    await cancelEventOrder("ev-1", user);
+
+    expect(openClaims()).toHaveLength(0);
   });
 });

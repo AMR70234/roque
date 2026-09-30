@@ -27,7 +27,7 @@ import {
 import type { EventOrder } from "@/lib/types";
 import { TokenIcon } from "./TokenIcon";
 import { ShareButton } from "./ShareButton";
-import { formatAmount, timeAgo } from "@/lib/format";
+import { formatAmount, timeAgo, timeUntil, exactTime } from "@/lib/format";
 
 const EXPLORER = "https://sepolia.etherscan.io/tx/";
 
@@ -193,7 +193,14 @@ export function EventOrderCard({
           </a>
         ) : null}
         {order.expiresAt && live ? (
-          <span className="event-expiry">Expires {timeAgo(order.expiresAt)}</span>
+          <span className="event-expiry" title={exactTime(order.expiresAt)}>
+            Expires {timeUntil(order.expiresAt)}
+          </span>
+        ) : null}
+        {order.expiresAt && order.status === "expired" ? (
+          <span className="event-expiry" title={exactTime(order.expiresAt)}>
+            Expired {timeAgo(order.expiresAt)}
+          </span>
         ) : null}
         <span className="event-foot-spacer" />
         {order.status === "screening" ? (

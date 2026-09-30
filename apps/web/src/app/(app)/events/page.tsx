@@ -13,36 +13,30 @@
 import { useState } from "react";
 import { Radar, RefreshCw } from "lucide-react";
 import { useAppData } from "@/providers/AppData";
-import { usePoll } from "@/lib/hooks";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
 import { VaultFundedNotice } from "@/components/VaultFundedNotice";
 import { EventOrderComposer } from "@/components/EventOrderComposer";
 import { EventOrderCard } from "@/components/EventOrderCard";
-import type { EventOrder } from "@/lib/types";
-
-// Long, because the interesting changes here arrive from the keeper minutes
-// apart, not second to second.
-const POLL_MS = 20_000;
+import {
+  EventOrderFilter,
+  filterEventOrders,
+  type EventGroup,
+  type EventPeriod,
+} from "@/components/EventOrderFilter";
 
 export default function EventsPage() {
-  const { address, wallet, sessionReady, refreshAll } = useAppData();
+  // The rows come from the shared poll rather than a second one of our own: the
+  // inbox chat answers questions about these same orders, and two polls against
+  // one list would disagree with each other for twenty seconds at a time.
+  const { address, sessionReady, refreshAll, wallet, eventOrders: orders } = useAppData();
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
+  const [group, setGroup] = useState<EventGroup>("all");
+  const [period, setPeriod] = useState<EventPeriod>("all");
 
   const live = address && sessionReady;
-  const orders = usePoll<EventOrder[]>(
-    live
-      ? async () => {
-          const { client } = await wallet.getClient();
-          const res = await api.eventOrders(address, client);
-          return res.orders;
-        }
-      : null,
-    POLL_MS,
-    [address, sessionReady],
-  );
 
   const screen = async (id: string) => {
     if (!address) return;
@@ -88,6 +82,7 @@ export default function EventsPage() {
 
   const rows = orders.data ?? [];
   const watching = rows.filter((o) => o.status === "armed").length;
+  const shown = filterEventOrders(rows, group, period);
 
   return (
     <div className="events-screen">
@@ -124,6 +119,14 @@ export default function EventsPage() {
 
           {orders.error ? <p className="events-error">{orders.error}</p> : null}
 
+          <EventOrderFilter
+            orders={rows}
+            group={group}
+            period={period}
+            onGroup={setGroup}
+            onPeriod={setPeriod}
+          />
+
           {rows.length === 0 && !orders.loading ? (
             <section className="card events-empty">
               <Radar size={26} />
@@ -132,9 +135,19 @@ export default function EventsPage() {
                 worth seeing too.
               </p>
             </section>
+          ) : shown.length === 0 ? (
+            /* Orders exist, just none in this corner of them. Say which corner,
+               so the filter never reads as an empty account. */
+            <section className="card events-empty">
+              <Radar size={26} />
+              <p>
+                None of your {rows.length} event order{rows.length === 1 ? "" : "s"} match this
+                filter. Widen the status or the period to see the rest.
+              </p>
+            </section>
           ) : (
             <div className="events-list">
-              {rows.map((o) => (
+              {shown.map((o) => (
                 <EventOrderCard
                   key={o.id}
                   order={o}

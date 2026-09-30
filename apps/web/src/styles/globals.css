@@ -2292,6 +2292,37 @@ html, body {
   font-size: 0.88rem;
 }
 .events-list { display: flex; flex-direction: column; gap: 14px; }
+
+/* ── Narrowing the watch list ──
+   Two rows rather than one, because status and period are independent choices
+   and a single wrapping row of nine chips reads as one long undifferentiated
+   list. On a phone each row scrolls sideways instead of wrapping, so the chips
+   keep their shape and the rows stay two. */
+.event-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.event-filter-row {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.event-filter-row::-webkit-scrollbar { display: none; }
+.event-filter-row .feed-tab { white-space: nowrap; }
+.event-filter-count {
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+.feed-tab.is-active .event-filter-count { color: var(--accent); }
 .events-empty {
   display: grid;
   justify-items: center;

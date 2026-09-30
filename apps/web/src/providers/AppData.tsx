@@ -25,9 +25,11 @@ import type {
   ActivityResult,
   CapabilityResult,
   ChatTurn,
+  EventOrder,
   InterpretResult,
   Mode,
   OrdersResult,
+  Playbook,
   PriceResult,
   Proposal,
   SettleState,
@@ -70,6 +72,11 @@ interface AppDataValue {
   // The inbox, polled here rather than on its page so the navbar can badge it
   // without a second read of the same rows.
   proposals: PollState<Proposal[]>;
+  // Event orders and playbooks live here for the same reason: their own screens
+  // read them, and so does the inbox chat, which would otherwise open a second
+  // poll against the same rows to answer a question about them.
+  eventOrders: PollState<EventOrder[]>;
+  playbooks: PollState<Playbook[]>;
   ethUsd: number;
   prices: Record<string, number>;
   canAutonomous: boolean;
@@ -182,6 +189,30 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         }
       : null,
     30_000,
+    [address, sessionReady],
+  );
+
+  // Both gated on the session for the same reason as the inbox: a condition a
+  // person wrote is private text, and it is not read until they have signed.
+  const eventOrders = usePoll<EventOrder[]>(
+    address && sessionReady
+      ? async () => {
+          const { client } = await wallet.getClient();
+          return (await api.eventOrders(address, client)).orders;
+        }
+      : null,
+    20_000,
+    [address, sessionReady],
+  );
+
+  const playbooks = usePoll<Playbook[]>(
+    address && sessionReady
+      ? async () => {
+          const { client } = await wallet.getClient();
+          return (await api.playbooks(address, client)).playbooks;
+        }
+      : null,
+    20_000,
     [address, sessionReady],
   );
 
@@ -416,6 +447,8 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     activity,
     orders,
     proposals,
+    eventOrders,
+    playbooks,
     ethUsd,
     prices,
     canAutonomous,

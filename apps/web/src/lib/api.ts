@@ -64,8 +64,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // status people will actually hit gets its own sentence rather than the
     // generic one.
     if (res.status === 504 || res.status === 408) {
+      // The order is genuinely untouched: a screen that times out leaves the
+      // row in 'screening', and the keeper picks those up on its own pass. So
+      // this is a delay, not a failure, and it should not read like one.
       throw new Error(
-        "That took longer than the server would wait. A verifiability screen is a consensus round across validators, and a slow one can outlast the request. The order is untouched -- try screening it again.",
+        "That took longer than the server would wait. A verifiability screen is a consensus round across validators, and a slow one outlasts the request. Your order is untouched and still queued \u2014 the keeper screens it within a few minutes, or you can press Screen it again.",
       );
     }
     throw new Error(

@@ -18,8 +18,10 @@ import {
   Check,
   ChevronDown,
   ExternalLink,
+  Hourglass,
   Loader2,
   Newspaper,
+  Rocket,
   ShieldAlert,
   ShieldCheck,
   Radar,
@@ -35,23 +37,29 @@ const STATUS: Record<
   EventOrder["status"],
   { label: string; tone: string; icon: React.ReactNode }
 > = {
-  screening: { label: "Screening", tone: "tone-neutral", icon: <Loader2 size={13} className="is-spinning" /> },
+  // Not "Screening": nothing is happening yet. The order sits here until the
+  // person asks for the screen, and a spinner on a card that is doing nothing
+  // reads as work in progress that never finishes.
+  screening: { label: "Awaiting screen", tone: "tone-neutral", icon: <Hourglass size={13} /> },
+  screened: { label: "Ready to arm", tone: "tone-warn", icon: <ShieldCheck size={13} /> },
   rejected: { label: "Refused", tone: "tone-bad", icon: <ShieldAlert size={13} /> },
   armed: { label: "Watching", tone: "tone-live", icon: <Radar size={13} /> },
   filled: { label: "Filled", tone: "tone-live", icon: <Check size={13} /> },
   failed: { label: "Failed", tone: "tone-bad", icon: <Ban size={13} /> },
   expired: { label: "Expired", tone: "tone-warn", icon: <CalendarClock size={13} /> },
-  cancelled: { label: "Cancelled", tone: "tone-neutral", icon: <Ban size={13} /> },
+  cancelled: { label: "Cancelled", tone: "tone-bad", icon: <Ban size={13} /> },
 };
 
 export function EventOrderCard({
   order,
   onScreen,
+  onArm,
   onCancel,
   busy,
 }: {
   order: EventOrder;
   onScreen: (id: string) => void;
+  onArm: (id: string) => void;
   onCancel: (id: string) => void;
   busy: string | null;
 }) {
@@ -61,15 +69,18 @@ export function EventOrderCard({
   const size = order.amountIsPercent
     ? `${order.amount}% of ${order.tokenIn}`
     : `${formatAmount(order.amount)} ${order.tokenIn}`;
-  const live = order.status === "armed" || order.status === "screening";
+  const live =
+    order.status === "armed" || order.status === "screening" || order.status === "screened";
   const items = order.evidence?.items ?? [];
 
   return (
     <article className={`card event-card ${order.status === "rejected" ? "is-refused" : ""}`}>
       <header className="event-card-head">
         <span className={`event-status ${status.tone}`}>
-          {status.icon}
-          {status.label}
+          {/* The spinner belongs to the request, not the status. It shows while
+              this card is the one waiting on the server and nowhere else. */}
+          {working ? <Loader2 size={13} className="is-spinning" /> : status.icon}
+          {working && order.status === "screening" ? "Screening" : status.label}
         </span>
         <span className="event-card-time">{timeAgo(order.createdAt)}</span>
       </header>
@@ -122,12 +133,15 @@ export function EventOrderCard({
         </div>
       ) : order.status === "screening" ? (
         <div className="event-screen is-pending">
-          <Loader2 size={15} className="is-spinning" />
+          {working ? <Loader2 size={15} className="is-spinning" /> : <Hourglass size={15} />}
           <div>
-            <p className="event-screen-title">Not yet screened</p>
+            <p className="event-screen-title">
+              {working ? "Asking the validators" : "Not yet screened"}
+            </p>
             <p className="event-screen-reason">
-              Ask the validators whether this is checkable. It takes about half a minute; nothing
-              can fill until it passes.
+              {working
+                ? "A consensus round across validators. It takes about half a minute."
+                : "Press Screen it to ask the validators whether this is checkable. It takes about half a minute, and nothing can fill until it passes."}
             </p>
           </div>
         </div>
@@ -213,7 +227,18 @@ export function EventOrderCard({
             Screen it
           </button>
         ) : null}
-        {order.status === "armed" ? (
+        {order.status === "screened" ? (
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => onArm(order.id)}
+            disabled={working}
+            title="Put this order live and set aside the money it will spend"
+          >
+            {working ? <span className="spinner" /> : <Rocket size={14} />}
+            Arm it
+          </button>
+        ) : null}
+        {order.status === "armed" || order.status === "screened" ? (
           <ShareButton kind="event_order" id={order.id} defaultTitle={order.condition} />
         ) : null}
         {live ? (

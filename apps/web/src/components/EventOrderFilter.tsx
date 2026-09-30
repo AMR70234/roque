@@ -37,7 +37,9 @@ export const EVENT_GROUPS: Record<EventGroup, EventOrder["status"][] | null> = {
   // Three ways an order ends without trading, which a person reads as one thing:
   // it is over and nothing happened.
   cancelled: ["cancelled", "expired", "failed"],
-  screening: ["screening", "rejected"],
+  // Everything before a person has armed it: waiting to be screened, cleared
+  // and waiting on them, or refused.
+  screening: ["screening", "screened", "rejected"],
 };
 
 /** How far back to look, in days. `null` is everything ever. */
@@ -53,7 +55,7 @@ const GROUP_LABELS: Record<EventGroup, string> = {
   watching: "Watching",
   executed: "Executed",
   cancelled: "Cancelled",
-  screening: "Screening",
+  screening: "Pre-arm",
 };
 
 const PERIOD_LABELS: Record<EventPeriod, string> = {

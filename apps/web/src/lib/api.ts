@@ -38,12 +38,44 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   const text = await res.text();
-  const body = text ? JSON.parse(text) : {};
+
+  // Not everything that answers is our own route. A platform timeout or a
+  // crashed function replies with an HTML or plain-text error page, and parsing
+  // that as JSON used to throw "Unexpected token 'A'" -- which told the person
+  // nothing and hid what had actually gone wrong. So the status is read first
+  // and a body that will not parse is treated as no body at all.
+  let body: unknown = {};
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = {};
+      if (res.ok) {
+        // A 200 that is not JSON is not something a caller can use.
+        throw new Error("The server sent a reply this app could not read.");
+      }
+    }
+  }
 
   if (!res.ok) {
-    const message =
-      typeof body?.error === "string" ? body.error : "Something went sideways. Try again.";
-    throw new Error(message);
+    const err = (body as { error?: unknown }).error;
+    if (typeof err === "string") throw new Error(err);
+    // A screen is a consensus round and the long pole in this app, so the one
+    // status people will actually hit gets its own sentence rather than the
+    // generic one.
+    if (res.status === 504 || res.status === 408) {
+      // The order is genuinely untouched: a screen that times out leaves the
+      // row in 'screening', and the keeper picks those up on its own pass. So
+      // this is a delay, not a failure, and it should not read like one.
+      throw new Error(
+        "That took longer than the server would wait. A verifiability screen is a consensus round across validators, and a slow one outlasts the request. Your order is untouched and still queued \u2014 the keeper screens it within a few minutes, or you can press Screen it again.",
+      );
+    }
+    throw new Error(
+      res.status >= 500
+        ? `The server could not finish that (${res.status}). Nothing was changed.`
+        : "Something went sideways. Try again.",
+    );
   }
   return body as T;
 }
@@ -267,6 +299,16 @@ export const api = {
   async eventOrders(user: `0x${string}`, wallet: WalletClient) {
     const token = await autonomousToken(wallet, user);
     return request<{ orders: EventOrder[] }>(`/events/${user}`, { headers: bearer(token) });
+  },
+
+  /** Put a screened order live. This is the call that claims the vault money. */
+  async armEventOrder(id: string, user: `0x${string}`, wallet: WalletClient) {
+    const token = await autonomousToken(wallet, user);
+    return request<{ order: EventOrder }>("/events/arm", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify({ id }),
+    });
   },
 
   async cancelEventOrder(id: string, user: `0x${string}`, wallet: WalletClient) {

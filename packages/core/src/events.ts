@@ -45,6 +45,7 @@ export const EVENT_MAX_FILL_ATTEMPTS = 3;
 
 export type EventOrderStatus =
   | "screening"
+  | "screened"
   | "rejected"
   | "armed"
   | "filled"
@@ -400,23 +401,11 @@ export async function createEventOrder(input: CreateEventOrderInput): Promise<Ev
       input.sourceSlug ?? null,
     ],
   );
-  const order = toEventOrder(rows[0]);
-
-  // The money is now promised. Reserved after the insert rather than before,
-  // because the claim is keyed to the order id and there is no id until the row
-  // exists; a crash between the two leaves an order holding nothing, which the
-  // funding gate treats as unfunded and is the safe direction to fail in.
-  await reserve([
-    {
-      user: order.user,
-      token: tokenIn.symbol,
-      amount,
-      amountIsPercent: input.amountIsPercent ?? false,
-      source: "event_order",
-      sourceId: order.id,
-    },
-  ]);
-  return order;
+  // Nothing is promised yet. The vault was checked above so the person is told
+  // now rather than after a consensus round, but the money is not held until
+  // they arm the order themselves -- holding a balance against every sentence
+  // somebody screened would lock up a vault for orders that never go live.
+  return toEventOrder(rows[0]);
 }
 
 /**
@@ -472,15 +461,82 @@ export async function screenEventOrder(id: string): Promise<EventOrder> {
     );
   }
 
-  const armed = await q<EventOrderRow>(
+  // Verifiable, and that is all this step decides. The order waits at
+  // 'screened' for the person to arm it: a screen answers "could this be
+  // checked", which is not the same question as "put my money behind it", and
+  // running the two together meant a sentence became a live commitment without
+  // anybody pressing anything.
+  const screened = await q<EventOrderRow>(
     `UPDATE event_orders
-        SET status='armed', screen_verdict='verifiable', screen_reason=$2,
+        SET status='screened', screen_verdict='verifiable', screen_reason=$2,
             screen_confidence=$3, screen_sources=$4, evidence=$5, error=NULL,
             updated_at=now()
       WHERE id=$1 AND status='screening' RETURNING *`,
     [id, verdict.rationale, verdict.confidence, JSON.stringify(sources), JSON.stringify(evidence)],
   );
-  return toEventOrder(armed[0] ?? rows[0]);
+  return toEventOrder(screened[0] ?? rows[0]);
+}
+
+/**
+ * Arm a screened order, which is the moment it becomes a real commitment.
+ *
+ * This is where the money is promised, for the same reason a playbook holds
+ * nothing until it is armed: a screened order is a sentence the validators say
+ * they could check, and holding a balance against every sentence somebody tried
+ * would lock up a vault for nothing.
+ *
+ * The vault is checked again here rather than trusted from creation time. The
+ * screen is a consensus round and takes half a minute; the balance can have
+ * moved, or another order can have promised it, in between.
+ */
+export async function armEventOrder(id: string, user: string): Promise<EventOrder> {
+  const rows = await q<EventOrderRow>(
+    `${SELECT} WHERE id=$1 AND LOWER(user_address)=LOWER($2)`,
+    [id, user],
+  );
+  const row = rows[0];
+  if (!row) throw new Error("That order is not yours.");
+  if (row.status === "armed") return toEventOrder(row);
+  if (row.status !== "screened") {
+    throw new Error("Only an order the validators have cleared can be armed.");
+  }
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+    throw new Error("That order ran out its clock before it was armed.");
+  }
+
+  const tokenIn = requireToken(row.token_in);
+  await assertVaultFunds(row.user_address as `0x${string}`, [
+    {
+      tokenIn: tokenIn.symbol,
+      tokenOut: requireToken(row.token_out).symbol,
+      amount: row.amount,
+      amountIsPercent: row.amount_is_percent,
+      where: "This order",
+    },
+  ]);
+
+  const armed = await q<EventOrderRow>(
+    `UPDATE event_orders SET status='armed', error=NULL, updated_at=now()
+      WHERE id=$1 AND status='screened' RETURNING *`,
+    [id],
+  );
+  if (!armed[0]) throw new Error("That order is no longer waiting to be armed.");
+
+  // Reserved after the status moves, so a crash between the two leaves an armed
+  // order holding nothing rather than a screened order holding money it may
+  // never spend. The funding gate treats an unheld order as unfunded, which is
+  // the safe direction to fail in.
+  await reserve([
+    {
+      user: row.user_address,
+      token: tokenIn.symbol,
+      amount: row.amount,
+      amountIsPercent: row.amount_is_percent,
+      source: "event_order",
+      sourceId: id,
+    },
+  ]);
+  return toEventOrder(armed[0]);
 }
 
 async function reject(
@@ -623,7 +679,7 @@ export async function cancelEventOrder(id: string, user: string): Promise<EventO
   const rows = await q<EventOrderRow>(
     `UPDATE event_orders SET status='cancelled', updated_at=now()
       WHERE id=$1 AND LOWER(user_address)=LOWER($2)
-        AND status IN ('screening','armed') RETURNING *`,
+        AND status IN ('screening','screened','armed') RETURNING *`,
     [id, user],
   );
   if (!rows[0]) throw new Error("That order is not yours, or is no longer open.");
@@ -685,7 +741,8 @@ export async function eventTick(): Promise<EventTickResult> {
   // Sweep anything that ran out its clock without a verdict.
   const expired = await q<{ id: string }>(
     `UPDATE event_orders SET status='expired', updated_at=now()
-      WHERE status='armed' AND expires_at IS NOT NULL AND expires_at <= now()
+      WHERE status IN ('armed','screened') AND expires_at IS NOT NULL
+        AND expires_at <= now()
       RETURNING id`,
   );
   // This sweep never goes through evaluateEventOrder, so it has to let the

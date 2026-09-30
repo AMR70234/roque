@@ -176,6 +176,8 @@ export interface AgentInfo {
 
 export type EventOrderStatus =
   | "screening"
+  /** Cleared by the validators, waiting for the person to arm it. */
+  | "screened"
   | "rejected"
   | "armed"
   | "filled"

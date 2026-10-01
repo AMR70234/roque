@@ -495,8 +495,11 @@ export function InboxChat() {
       </header>
       <div className="inbox-chat-log" ref={logRef}>
         {lines.length === 0 ? <p className="panel-empty">{HINT}</p> : null}
-        {lines.map((l) => (
-          <p key={l.id} className={`inbox-chat-line inbox-chat-${l.from}`}>
+                        {lines.map((l, i) => (
+          <p
+            key={l.id}
+                        className={`inbox-chat-line inbox-chat-${l.from} ${i >= lines.length - 2 ? "inbox-chat-rise" : ""}`}
+          >
             {l.text}
           </p>
         ))}

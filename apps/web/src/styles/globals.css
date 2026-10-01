@@ -2768,6 +2768,7 @@ html, body {
 
 /* ── Inbox chat ─────────────────────────────────────────────── */
 .inbox-chat { margin-top: 18px; padding: 16px; }
+.inbox-chat-rise { animation: rise 0.75s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .inbox-chat-log { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; padding: 6px 0 12px; }
 .inbox-chat-line { max-width: 85%; padding: 8px 12px; border-radius: 12px; font-size: 0.9rem; line-height: 1.45; }
 .inbox-chat-you { align-self: flex-end; background: var(--accent-soft); color: var(--accent); }

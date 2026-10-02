@@ -151,8 +151,14 @@ export const eip712Domain = {
   verifyingContract: addresses.agentExecutor,
 } as const;
 
-// The typed-data shapes for the two intents and the capability grant. These
-// mirror the structs and typehashes in AgentExecutor.sol one for one.
+// The typed-data shapes for the intents and the capability grant. These mirror
+// the structs and typehashes in AgentExecutor.sol one for one, field order
+// included: EIP-712 hashes the encoding in declaration order, so a field in the
+// wrong place here produces a signature the contract will reject as a stranger's.
+//
+// `commitmentId` is the vault money this action is spending. Zero means an
+// ordinary trade, which may only reach the free half of the vault. A real id
+// means the trade is the fulfilment of a commitment, and spends that.
 export const eip712Types = {
   SwapIntent: [
     { name: "user", type: "address" },
@@ -160,6 +166,7 @@ export const eip712Types = {
     { name: "tokenOut", type: "address" },
     { name: "amountIn", type: "uint256" },
     { name: "minAmountOut", type: "uint256" },
+    { name: "commitmentId", type: "bytes32" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint256" },
   ],
@@ -172,7 +179,28 @@ export const eip712Types = {
     { name: "triggerPrice", type: "uint256" },
     { name: "triggerAbove", type: "bool" },
     { name: "expiry", type: "uint64" },
+    { name: "commitmentId", type: "bytes32" },
     { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+  // Setting vault money aside for one named future trade. Moves nothing; all it
+  // does is narrow what the rest of the vault is allowed to do.
+  CommitIntent: [
+    { name: "user", type: "address" },
+    { name: "token", type: "address" },
+    { name: "amount", type: "uint256" },
+    { name: "unlockAt", type: "uint64" },
+    { name: "commitmentId", type: "bytes32" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+  // Handing it back. The epoch pins the signature to one particular lock of
+  // that id, so a release written for an order that was cancelled cannot be
+  // replayed to quietly unfund the same order after it is armed again.
+  ReleaseIntent: [
+    { name: "user", type: "address" },
+    { name: "commitmentId", type: "bytes32" },
+    { name: "epoch", type: "uint32" },
     { name: "deadline", type: "uint256" },
   ],
   Grant: [

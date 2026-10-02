@@ -135,6 +135,9 @@ export function InboxChat() {
   const [lines, setLines] = useState<Line[]>([]);
   const [value, setValue] = useState("");
   const idRef = useRef(0);
+  // Remembers the last token a question named, so a short follow-up like
+  // "what about btc" or "and eth" can be read without repeating the subject.
+  const lastTokenRef = useRef<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   // Set on the first paint of a restored conversation, so coming back to the tab
   // lands at the bottom without animating through a fortnight of history.
@@ -401,8 +404,23 @@ export function InboxChat() {
       return `Your latest settled trades: ${last.join("; ")}.`;
     }
     
-    const tokens = findTokens(text);
+        // A short follow-up ("what about btc", "and eth", "same for gold") that
+    // names a token but gives no verb of its own reuses the last question's
+    // intent against the new token, instead of falling through to the hint.
+    const FOLLOW_UP = /^\s*(what about|and|what'?s|how about|same for)\b/i;
+    let tokens = findTokens(text);
+    if (tokens.length > 0 && FOLLOW_UP.test(text) && lastTokenRef.current) {
+      const t = tokens[0];
+      if (t) {
+        const held = balances.data?.[t];
+        const own = held !== undefined && held > 0 ? ` You hold ${formatAmount(held)} in your wallet.` : "";
+        lastTokenRef.current = t;
+        return `${priceLine(t)}${own}`;
+      }
+    }
     if (tokens.length > 0) {
+      const first = tokens[0];
+      if (first) lastTokenRef.current = first;
       if (HOLD.test(lower)) {
         if (!balances.data) return NO_WALLET;
         return tokens.slice(0, 3).map(holdLine).join(" ");
@@ -477,8 +495,11 @@ export function InboxChat() {
       </header>
       <div className="inbox-chat-log" ref={logRef}>
         {lines.length === 0 ? <p className="panel-empty">{HINT}</p> : null}
-        {lines.map((l) => (
-          <p key={l.id} className={`inbox-chat-line inbox-chat-${l.from}`}>
+                        {lines.map((l, i) => (
+          <p
+            key={l.id}
+                        className={`inbox-chat-line inbox-chat-${l.from} ${i >= lines.length - 2 ? "inbox-chat-rise" : ""}`}
+          >
             {l.text}
           </p>
         ))}

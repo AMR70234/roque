@@ -1,7 +1,7 @@
 /**
  * The rules behind the four judgment features, tested where they are pure.
  *
- * Every expensive part of Roque — a consensus round, a vault swap — sits behind
+ * Every expensive part of Roque, a consensus round or a vault swap, sits behind
  * a decision that is just a function of its inputs. Those functions are what
  * this file pins down: which conditions are refused before anyone pays for a
  * screen, when a playbook step is allowed to fire, what a step may contain, and
@@ -325,7 +325,7 @@ describe("vaultFundingNeeds", () => {
   });
 
   it("only asks a percentage leg for a balance that is not zero", () => {
-    // 25% of the vault cannot be sized now — the keeper decides it at fire time
+    // 25% of the vault cannot be sized now, since the keeper decides it at fire time
     // against whatever is there. What can be said now is that 25% of nothing is
     // nothing, so an empty vault is still a refusal.
     expect(vaultFundingNeeds([leg({ amount: "25", amountIsPercent: true })])).toEqual([

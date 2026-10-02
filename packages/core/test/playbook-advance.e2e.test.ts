@@ -1,7 +1,7 @@
 /**
  * The playbook engine: one step considered per call, in order, once.
  *
- * The ordering guarantee is the whole product here — a ladder whose second rung
+ * The ordering guarantee is the whole product here: a ladder whose second rung
  * fires before its first is not a plan, it is two random trades. That guarantee
  * rests on the cursor-guarded claim, so the case where a second runner finds
  * nothing to claim is tested as carefully as the happy path. The other rule

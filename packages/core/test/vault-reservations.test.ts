@@ -9,7 +9,7 @@
  *
  * So most of these assert an absence: no second order, no second claim, no hold
  * left standing on something that can no longer trade. The releases matter as
- * much as the holds — a claim that outlives its order is money locked up for
+ * much as the holds, since a claim that outlives its order is money locked up for
  * nothing, which is the same bug pointing the other way.
  */
 

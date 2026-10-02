@@ -144,7 +144,7 @@ app.get<{ Params: { user: string } }>("/playbooks/:user", async (req) =>
 );
 
 // ── Shares: a thesis that travels without the position ────────
-// Reading a share is deliberately public — that is the whole point of the link.
+// Reading a share is deliberately public, which is the whole point of the link.
 // Everything that touches a vault still needs the session.
 app.post("/shares", async (req) =>
   handlePublishShare(req.body, bearerToken(req.headers.authorization)),

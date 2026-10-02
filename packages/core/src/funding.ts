@@ -1,8 +1,8 @@
 /**
  * Can the vault actually pay for this?
  *
- * Every unattended trade Roque makes — an event order that fires, a playbook
- * rung that comes due — spends from `AgentExecutor.vaultBalance[user][token]`
+ * Every unattended trade Roque makes, an event order that fires or a playbook
+ * rung that comes due, spends from `AgentExecutor.vaultBalance[user][token]`
  * and from nowhere else. The connected wallet is not touched, because the agent
  * has no authority over it. That is a good property right up until someone
  * writes an order against money the agent cannot reach, at which point the
@@ -26,7 +26,7 @@
  * on-chain refusal cannot drift apart: being short here means being short there.
  *
  * The arithmetic is pure and the chain read is one thin wrapper over it, so the
- * interesting part — which legs the vault is even on the hook for — is testable
+ * interesting part, which legs the vault is even on the hook for, is testable
  * without a node.
  */
 
@@ -74,8 +74,8 @@ function requireToken(symbol: string): TokenMeta {
  * else is: two rungs that each spend 100 rUSDC straight from the vault need 200
  * sitting there, not 100 twice.
  *
- * A percentage leg cannot be summed — its size is decided at fire time against
- * whatever the balance is then — so all it asks is that the balance not be
+ * A percentage leg cannot be summed, since its size is decided at fire time
+ * against whatever the balance is then, so all it asks is that the balance not be
  * zero, since a percentage of nothing is nothing.
  */
 export function vaultFundingNeeds(legs: FundingLeg[]): FundingNeed[] {
@@ -111,7 +111,7 @@ export function vaultFundingNeeds(legs: FundingLeg[]): FundingNeed[] {
  *
  * `free` is what is actually spendable and `hold` is what resting orders have
  * already promised. When something is held the sentence says so, because "your
- * vault holds 600" is confusing to somebody looking at a balance of 1,000 —
+ * vault holds 600" is confusing to somebody looking at a balance of 1,000, and
  * the missing 400 needs naming, along with how to get it back.
  */
 function shortfall(

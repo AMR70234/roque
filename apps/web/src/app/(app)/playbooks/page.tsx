@@ -11,6 +11,7 @@
 import { useState } from "react";
 import { ListOrdered, RefreshCw } from "lucide-react";
 import { useAppData } from "@/providers/AppData";
+import type { Playbook } from "@/lib/types";
 import { api } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
@@ -30,6 +31,10 @@ export default function PlaybooksPage() {
   const { address, wallet, sessionReady, refreshAll, playbooks: books } = useAppData();
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
+  // The draft loaded into the builder, by id. Held as an id rather than the row
+  // so the shared poll's next refresh feeds the builder current steps instead of
+  // a snapshot taken when Edit was pressed.
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [group, setGroup] = useState<PlaybookGroup>("all");
   const [period, setPeriod] = useState<PlaybookPeriod>("all");
 
@@ -52,6 +57,8 @@ export default function PlaybooksPage() {
         "Running",
         "The keeper walks it from step one. Each rung's money is held in the vault until that rung trades.",
       );
+      // It is not a draft any more, so it is not editable any more.
+      setEditingId((current) => (current === id ? null : current));
       books.refresh();
     } catch (err) {
       toast.dismiss(pending);
@@ -80,6 +87,22 @@ export default function PlaybooksPage() {
   };
 
   const rows = books.data ?? [];
+  // Resolved from the current rows, so the builder follows the row rather than a
+  // copy of it. A draft that stops being a draft stops being editable, which is
+  // what happens when another tab arms it mid-edit.
+  const editing = rows.find((p) => p.id === editingId && p.status === "draft") ?? null;
+
+  /**
+   * Load a draft into the builder and put the builder where the person is
+   * looking. Without the scroll the Edit button appears to do nothing: the form
+   * is above the list and on a long list it is well off screen.
+   */
+  const edit = (playbook: Playbook) => {
+    setEditingId(playbook.id);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
   const running = rows.filter((p) => p.status === "armed").length;
   const shown = filterPlaybooks(rows, group, period);
 
@@ -114,7 +137,11 @@ export default function PlaybooksPage() {
 
       {live ? (
         <>
-          <PlaybookBuilder onCreated={() => books.refresh()} />
+          <PlaybookBuilder
+            editing={editing}
+            onCancelEdit={() => setEditingId(null)}
+            onCreated={() => books.refresh()}
+          />
 
           {books.error ? <p className="events-error">{books.error}</p> : null}
 
@@ -148,8 +175,10 @@ export default function PlaybooksPage() {
                   key={p.id}
                   playbook={p}
                   onArm={(id) => void arm(id)}
+                  onEdit={edit}
                   onCancel={(id) => void cancel(id)}
                   busy={busy}
+                  editing={editingId === p.id}
                 />
               ))}
             </div>

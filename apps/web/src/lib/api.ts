@@ -330,6 +330,30 @@ export const api = {
 
   // ── Playbooks ──────────────────────────────────────────────
 
+  /**
+   * Change a draft. Only a draft: an armed plan has money held against its
+   * rungs, so the server refuses this rather than rewriting it under the hold.
+   */
+  async updatePlaybook(
+    input: {
+      id: string;
+      user: `0x${string}`;
+      name?: string;
+      note?: string;
+      steps?: unknown[];
+      slippageBps?: number;
+    },
+    wallet: WalletClient,
+  ) {
+    const token = await autonomousToken(wallet, input.user);
+    const { user: _user, ...patch } = input;
+    return request<{ playbook: Playbook }>("/playbooks/update", {
+      method: "POST",
+      headers: bearer(token),
+      body: JSON.stringify(patch),
+    });
+  },
+
   async createPlaybook(
     input: {
       user: `0x${string}`;

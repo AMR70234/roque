@@ -22,6 +22,7 @@ import {
   Clock,
   ExternalLink,
   Loader2,
+  Pencil,
   Radar,
   Rocket,
   ShieldCheck,
@@ -78,13 +79,18 @@ function stepIcon(s: PlaybookStep, isCursor: boolean) {
 export function PlaybookCard({
   playbook,
   onArm,
+  onEdit,
   onCancel,
   busy,
+  editing,
 }: {
   playbook: Playbook;
   onArm: (id: string) => void;
+  onEdit: (playbook: Playbook) => void;
   onCancel: (id: string) => void;
   busy: string | null;
+  /** True when this is the draft currently loaded into the builder. */
+  editing?: boolean;
 }) {
   const { vault } = useAppData();
   const working = busy === playbook.id;
@@ -184,6 +190,20 @@ export function PlaybookCard({
 
       <footer className="event-card-foot">
         <span className="event-foot-spacer" />
+        {/* Editing is offered before arming, and only on a draft, which is the
+            only state where changing the plan is still free. An armed plan has
+            money held against its rungs; the way to change that is to cancel. */}
+        {playbook.status === "draft" ? (
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => onEdit(playbook)}
+            disabled={working}
+            title="Change the steps while this is still a draft"
+          >
+            <Pencil size={14} />
+            {editing ? "Editing" : "Edit"}
+          </button>
+        ) : null}
         {playbook.status === "draft" ? (
           <button
             className="btn btn-primary btn-sm"

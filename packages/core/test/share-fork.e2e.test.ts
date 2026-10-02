@@ -13,7 +13,16 @@ import { reservationStore } from "./helpers/reservations.js";
 import type { PlaybookStep } from "../src/playbooks.js";
 import type { EventOrderPayload, PlaybookPayload } from "../src/shares.js";
 
-const state = vi.hoisted(() => ({ q: vi.fn(), vaultBalance: vi.fn() }));
+const state = vi.hoisted(() => ({
+  q: vi.fn(),
+  vaultBalance: vi.fn(),
+  lockedBalance: vi.fn(),
+  vaultSnapshot: vi.fn(),
+  freshNonce: vi.fn(),
+  lockCommitments: vi.fn(),
+  releaseCommitments: vi.fn(),
+  getCommitment: vi.fn(),
+}));
 
 vi.mock("../src/db/index.js", () => ({ q: state.q }));
 // Nothing on the fork path submits a trade or asks a model; stubbing these keeps
@@ -25,7 +34,15 @@ vi.mock("../src/services.js", () => ({
 // The one chain read the fork path does make is the funding check. It is stubbed
 // rather than mocked away, so the real gate runs against a balance we choose:
 // forking is exactly where someone else's position size meets your vault.
-vi.mock("../src/intents.js", () => ({ vaultBalance: state.vaultBalance }));
+vi.mock("../src/intents.js", () => ({
+  vaultBalance: state.vaultBalance,
+  lockedBalance: state.lockedBalance,
+  vaultSnapshot: state.vaultSnapshot,
+  freshNonce: state.freshNonce,
+  lockCommitments: state.lockCommitments,
+  releaseCommitments: state.releaseCommitments,
+  getCommitment: state.getCommitment,
+}));
 vi.mock("../src/genlayer.js", () => ({ adjudicate: vi.fn(), interpret: vi.fn() }));
 vi.mock("../src/prices.js", () => ({
   ethUsd: vi.fn(),
@@ -78,6 +95,7 @@ let held: ReturnType<typeof reservationStore>;
 beforeEach(() => {
   vi.clearAllMocks();
   held = reservationStore();
+  held.install(state);
   inserted = null;
   forkBumps = [];
   share = undefined;

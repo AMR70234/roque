@@ -134,7 +134,7 @@ async function autonomousToken(
 
 /**
  * Whether a usable wallet session is already in hand. The screens that read
- * private things — the conditions you trade on, your playbooks, your inbox — ask
+ * private things, meaning the conditions you trade on, your playbooks and your inbox, ask
  * this before they start polling, so visiting a page never fires an unexpected
  * signature request. When it comes back false they show an unlock affordance and
  * the person decides when to sign.

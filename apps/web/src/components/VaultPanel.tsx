@@ -22,10 +22,11 @@
  * waits a fortnight, gets its verdict and then fails on money that was quietly
  * taken back.
  *
- * The honest caveat: this is the app refusing, not the chain. AgentExecutor has
- * no notion of a locked balance, so a person determined to call withdraw on
- * Etherscan can still empty the vault and strand their own orders. Fixing that
- * properly needs a contract change; this fixes the path everybody actually uses.
+ * This used to come with a caveat, which was that the app was the only thing
+ * doing the refusing. It is not any more. The committed figure is the
+ * executor's own locked balance, and withdraw measures against it on-chain, so
+ * what this panel refuses is what the contract would refuse. The check here is
+ * only here to say so before the wallet asks rather than after.
  */
 
 import { useMemo, useState } from "react";
@@ -72,10 +73,10 @@ export function VaultPanel({
   const walletBal = Number(walletBalances[token] ?? 0);
   const price = Number(prices[token] ?? 0);
 
-  // What resting orders have promised, for the token on screen. Read as exact
-  // raw units because the comparison below decides whether a signature happens,
-  // and a float rounding the wrong way would either block a legal withdrawal or
-  // wave through an illegal one.
+  // What resting orders have promised, for the token on screen, straight from
+  // the executor. Read as exact raw units because the comparison below decides
+  // whether a signature happens, and a float rounding the wrong way would
+  // either block a legal withdrawal or wave one through to a revert.
   const meta = requireToken(token);
   const heldRaw = (() => {
     try {
@@ -142,8 +143,9 @@ export function VaultPanel({
       }
       return;
     }
-    // Refuse before the wallet prompt rather than after. A person who has
-    // already approved a transaction cannot be told the app changed its mind.
+    // Refuse before the wallet prompt rather than after. The chain refuses this
+    // too, but "committed to 2 live orders" is a better thing to read than a
+    // reverted transaction, and it arrives before anyone approves anything.
     if (direction === "withdraw" && heldRaw > 0n) {
       let want: bigint;
       try {
@@ -153,8 +155,8 @@ export function VaultPanel({
       }
       if (want > availableRaw) {
         toast.info(
-          "That much is committed",
-          `${formatAmount(formatUnits(heldRaw, meta.decimals))} ${token} is promised to ${claims} live order${claims === 1 ? "" : "s"}, so ${formatAmount(formatUnits(availableRaw, meta.decimals))} is free. Cancel an order to free the rest.`,
+          "That much is spoken for",
+          `${formatAmount(formatUnits(heldRaw, meta.decimals))} ${token} is held for ${claims} live order${claims === 1 ? "" : "s"}, so ${formatAmount(formatUnits(availableRaw, meta.decimals))} is free. The contract would turn this down too. Cancel an order to free the rest.`,
         );
         return;
       }
@@ -213,13 +215,13 @@ export function VaultPanel({
             <div key={t.symbol} className="vault-bal">
               <TokenIcon symbol={t.symbol} size={22} />
               <span className="tabular">
-                {loading && !vault ? "—" : formatAmount(vaultBalances[t.symbol] ?? 0)}
+                {loading && !vault ? "-" : formatAmount(vaultBalances[t.symbol] ?? 0)}
               </span>
               <span className="vault-bal-sym">{t.symbol}</span>
               {committed ? (
                 <span
                   className="vault-bal-held"
-                  title={`Promised to ${vault?.claims?.[t.symbol] ?? 0} live order(s) and not withdrawable until they close`}
+                  title={`Held by the vault contract for ${vault?.claims?.[t.symbol] ?? 0} live order(s). Cancel one to free it.`}
                 >
                   <Lock size={10} />
                   {formatAmount(formatUnits(BigInt(hold), requireToken(t.symbol).decimals))}
@@ -281,9 +283,10 @@ export function VaultPanel({
           <p className="vault-held-note">
             <Lock size={12} />
             <span>
-              {formatAmount(formatUnits(heldRaw, meta.decimals))} {token} is committed to{" "}
-              {claims} live order{claims === 1 ? "" : "s"}.{" "}
-              {formatAmount(formatUnits(availableRaw, meta.decimals))} is free to withdraw.
+              The vault is holding {formatAmount(formatUnits(heldRaw, meta.decimals))} {token}{" "}
+              for {claims} live order{claims === 1 ? "" : "s"}, so{" "}
+              {formatAmount(formatUnits(availableRaw, meta.decimals))} is yours to take back
+              right now. Cancel an order and its share comes free.
             </span>
           </p>
         ) : null}
@@ -294,7 +297,7 @@ export function VaultPanel({
             In your wallet
           </span>
           <button type="button" className="vault-wallet-bal tabular" onClick={fillMax} title="Use your full balance">
-            {balances.loading && !balances.data ? "—" : formatAmount(walletBal)} {token}
+            {balances.loading && !balances.data ? "-" : formatAmount(walletBal)} {token}
             <span className="vault-max">Max</span>
           </button>
         </div>

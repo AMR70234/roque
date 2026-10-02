@@ -16,6 +16,8 @@ const state = vi.hoisted(() => ({
   freshNonce: vi.fn(),
   agentSignerAddress: vi.fn(),
   vaultBalance: vi.fn(),
+  lockedBalance: vi.fn(),
+  getCommitment: vi.fn(),
   remainingDailyUsd: vi.fn(),
   quoteSwap: vi.fn(),
   minOutForSlippage: vi.fn(),
@@ -32,6 +34,10 @@ vi.mock("../src/intents.js", () => ({
   freshNonce: state.freshNonce,
   agentSignerAddress: state.agentSignerAddress,
   vaultBalance: state.vaultBalance,
+  lockedBalance: state.lockedBalance,
+  getCommitment: state.getCommitment,
+  NO_COMMITMENT:
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
   remainingDailyUsd: state.remainingDailyUsd,
 }));
 vi.mock("../src/genlayer.js", () => ({ interpret: vi.fn() }));
@@ -87,6 +93,7 @@ beforeEach(() => {
     exists: true,
   });
   state.agentSignerAddress.mockReturnValue(agent);
+  state.lockedBalance.mockResolvedValue(0n);
   state.vaultBalance.mockResolvedValue(1_000_000_000n);
   // Nothing spent today, so the daily ceiling never masks the per-trade one.
   state.remainingDailyUsd.mockResolvedValue(2_000n * 10n ** 18n);

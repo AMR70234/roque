@@ -1,7 +1,7 @@
 /**
  * The playbook engine: one step considered per call, in order, once.
  *
- * The ordering guarantee is the whole product here — a ladder whose second rung
+ * The ordering guarantee is the whole product here: a ladder whose second rung
  * fires before its first is not a plan, it is two random trades. That guarantee
  * rests on the cursor-guarded claim, so the case where a second runner finds
  * nothing to claim is tested as carefully as the happy path. The other rule
@@ -21,12 +21,26 @@ const state = vi.hoisted(() => ({
   preflightVaultSwap: vi.fn(),
   executeVaultSwap: vi.fn(),
   vaultBalance: vi.fn(),
+  lockedBalance: vi.fn(),
+  vaultSnapshot: vi.fn(),
+  freshNonce: vi.fn(),
+  lockCommitments: vi.fn(),
+  releaseCommitments: vi.fn(),
+  getCommitment: vi.fn(),
 }));
 
 vi.mock("../src/db/index.js", () => ({ q: state.q }));
 // The only chain read on this path is the funding gate arming does. It reads a
 // balance we choose, so the real gate runs rather than being mocked away.
-vi.mock("../src/intents.js", () => ({ vaultBalance: state.vaultBalance }));
+vi.mock("../src/intents.js", () => ({
+  vaultBalance: state.vaultBalance,
+  lockedBalance: state.lockedBalance,
+  vaultSnapshot: state.vaultSnapshot,
+  freshNonce: state.freshNonce,
+  lockCommitments: state.lockCommitments,
+  releaseCommitments: state.releaseCommitments,
+  getCommitment: state.getCommitment,
+}));
 vi.mock("../src/genlayer.js", () => ({ adjudicate: state.adjudicate, interpret: vi.fn() }));
 vi.mock("../src/services.js", () => ({
   preflightVaultSwap: state.preflightVaultSwap,
@@ -47,7 +61,7 @@ vi.mock("../src/events.js", () => ({
   EVENT_CHECK_INTERVAL_MS: 10 * 60 * 1000,
 }));
 
-const { advancePlaybook, armPlaybook, normaliseStep, cancelPlaybook } = await import(
+const { advancePlaybook, armPlaybook, normaliseStep, cancelPlaybook, playbookTick } = await import(
   "../src/playbooks.js"
 );
 
@@ -60,6 +74,8 @@ type Row = Record<string, unknown> & { steps: PlaybookStep[]; step_cursor: numbe
 let row: Row;
 let sqls: string[];
 let claimResult: Array<{ id: string }>;
+/** Set by the one test that wants the mid-trade reaper to find something. */
+let stranded = false;
 
 function mkStep(trigger: unknown, amount = "25"): PlaybookStep {
   return normaliseStep(
@@ -96,7 +112,9 @@ let held: ReturnType<typeof reservationStore>;
 beforeEach(() => {
   vi.clearAllMocks();
   held = reservationStore();
+  held.install(state);
   sqls = [];
+  stranded = false;
   claimResult = [{ id: "pb-1" }];
   row = baseRow([mkStep({ kind: "immediate" })]);
 
@@ -105,6 +123,16 @@ beforeEach(() => {
     const t = text.replace(/\s+/gu, " ").trim();
 
     if (t.startsWith("SELECT * FROM playbooks")) return [{ ...row }];
+    // What cancelPlaybook reads back to tell "not yours" from "mid-trade".
+    if (t.startsWith("SELECT status, steps, step_cursor FROM playbooks")) {
+      const asked = String(params[1] ?? "").toLowerCase();
+      if (asked !== String(row.user_address).toLowerCase()) return [];
+      return [{ status: row.status, steps: row.steps, step_cursor: row.step_cursor }];
+    }
+    // The tick's due list.
+    if (t.startsWith("SELECT id FROM playbooks WHERE status='armed'")) {
+      return row.status === "armed" ? [{ id: row.id }] : [];
+    }
     if (t.startsWith("INSERT INTO playbook_events")) return [];
 
     // The claim is checked before the plain check-counter update, because the
@@ -127,6 +155,8 @@ beforeEach(() => {
       return [{ ...row }];
     }
     if (t.includes("SET steps=$2::jsonb, step_cursor=$3")) {
+      // Guarded on the cursor the caller claimed and on the plan still running.
+      if (row.status !== "armed" || row.step_cursor !== params[3]) return [];
       Object.assign(row, {
         steps: JSON.parse(String(params[1])) as PlaybookStep[],
         step_cursor: params[2],
@@ -134,10 +164,32 @@ beforeEach(() => {
       return [{ ...row }];
     }
     if (t.includes("SET status='cancelled'")) {
+      // Cancelling refuses a plan whose rung is mid-trade, because releasing
+      // the hold while the swap spending it is in the mempool lands a trade
+      // against a plan that no longer exists.
+      if (!["draft", "armed"].includes(row.status as string)) return [];
+      if ((row.steps[row.step_cursor]?.status as string) === "firing") return [];
       Object.assign(row, { status: "cancelled" });
       return [{ ...row }];
     }
+    // Arming rolled back because the chain would not take the hold.
+    if (t.includes("SET status='draft', error=$2")) {
+      if (row.status !== "armed") return [];
+      Object.assign(row, { status: "draft", error: params[1] });
+      return [];
+    }
+    // The reaper for a rung whose worker died between sending and recording.
+    if (t.includes("A step was interrupted mid-trade")) {
+      if (row.status !== "armed") return [];
+      if ((row.steps[row.step_cursor]?.status as string) !== "firing") return [];
+      if (!stranded) return [];
+      Object.assign(row, { status: "failed" });
+      return [{ id: row.id }];
+    }
     if (t.includes("SET status='completed'")) {
+      // Guarded on 'armed', so a plan cancelled mid-walk is not then marked
+      // completed by the rung that was already in flight.
+      if (row.status !== "armed") return [];
       Object.assign(row, {
         status: "completed",
         steps: JSON.parse(String(params[1])) as PlaybookStep[],
@@ -145,6 +197,8 @@ beforeEach(() => {
       return [{ ...row }];
     }
     if (t.includes("SET status='armed'")) {
+      // Guarded on 'draft', so two requests cannot both arm one plan.
+      if (row.status !== "draft") return [];
       Object.assign(row, {
         status: "armed",
         steps: JSON.parse(String(params[1])) as PlaybookStep[],
@@ -196,12 +250,16 @@ describe("armPlaybook", () => {
     row = baseRow([absolute("100")], { status: "draft" });
   });
 
-  it("arms a plan the vault can pay for", async () => {
+  it("arms a plan the vault can pay for, and holds the money on-chain", async () => {
     const pb = await armPlaybook("pb-1", user);
 
     expect(pb.status).toBe("armed");
     expect(pb.steps[0]!.armedAt).not.toBeNull();
-    expect(state.vaultBalance).toHaveBeenCalledTimes(1);
+    // The hold is the executor's, so arming is not finished until it lands,
+    // and rUSDC is the only thing it holds.
+    expect(state.lockCommitments).toHaveBeenCalledTimes(1);
+    expect(held.lockedOf(user, "rUSDC")).toBe(100_000_000n);
+    expect([...held.locks.values()].map((l) => l.token)).toEqual(["rUSDC"]);
   });
 
   it("refuses to arm a plan the vault cannot pay for, and names the step", async () => {
@@ -245,8 +303,11 @@ describe("armPlaybook", () => {
     const pb = await armPlaybook("pb-1", user);
 
     expect(pb.status).toBe("armed");
-    // One read, for rUSDC only. A second read would mean rWETH was being asked for.
-    expect(state.vaultBalance).toHaveBeenCalledTimes(1);
+    // rUSDC only. A hold on rWETH would mean the ladder was being charged for
+    // money its own first rung creates.
+    expect(held.locks.size).toBe(1);
+    expect([...held.locks.values()].map((l) => l.token)).toEqual(["rUSDC"]);
+    expect(held.lockedOf(user, "rWETH")).toBe(0n);
   });
 
   it("checks the money before paying for a consensus round", async () => {
@@ -524,5 +585,67 @@ describe("what a playbook promises the vault", () => {
     await cancelPlaybook("pb-1", user);
 
     expect(openClaims()).toHaveLength(0);
+  });
+});
+
+/**
+ * Two workers, one plan.
+ *
+ * The cursor guard already stopped a rung firing twice, which was the obvious
+ * race. These are the ones around it: arming, cancelling, and the rung whose
+ * worker died with a transaction in the air.
+ */
+describe("two workers reaching the same plan", () => {
+  const absolute = (amount: string) =>
+    normaliseStep(
+      {
+        trigger: { kind: "immediate" },
+        action: { tokenIn: "rUSDC", tokenOut: "rWETH", amount, amountIsPercent: false },
+      },
+      0,
+    );
+
+  beforeEach(() => {
+    state.vaultBalance.mockResolvedValue(10_000_000_000n);
+  });
+
+  it("puts a plan back to draft when the chain will not hold the money", async () => {
+    row = baseRow([absolute("100")], { status: "draft" });
+    state.lockCommitments.mockRejectedValue(new Error("CommittedVault: 0 free"));
+
+    await expect(armPlaybook("pb-1", user)).rejects.toThrow("CommittedVault");
+    expect(row.status).toBe("draft");
+    expect(row.error).toContain("could not hold the vault money");
+  });
+
+  it("arms a plan once however many requests ask", async () => {
+    row = baseRow([absolute("100")], { status: "draft" });
+    const results = await Promise.allSettled([
+      armPlaybook("pb-1", user),
+      armPlaybook("pb-1", user),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    // And the money is promised once, not twice, because the id is derived from
+    // the rung rather than minted per attempt.
+    expect(held.lockedOf(user, "rUSDC")).toBe(100_000_000n);
+  });
+
+  it("refuses to cancel while the rung at the cursor is mid-trade", async () => {
+    row = baseRow([absolute("100")], { status: "armed" });
+    row.steps[0]!.status = "firing";
+
+    await expect(cancelPlaybook("pb-1", user)).rejects.toThrow("mid-trade");
+    expect(row.status).toBe("armed");
+  });
+
+  it("fails a plan left mid-trade rather than firing the rung again", async () => {
+    row = baseRow([absolute("100")], { status: "armed" });
+    row.steps[0]!.status = "firing";
+    stranded = true;
+
+    await playbookTick();
+
+    expect(row.status).toBe("failed");
+    expect(state.executeVaultSwap).not.toHaveBeenCalled();
   });
 });

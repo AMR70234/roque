@@ -15,7 +15,7 @@
 
 import { encodeFunctionData } from "viem";
 import { addresses, abis } from "@roque/shared";
-import { publicClient, relayerWallet } from "./chain.js";
+import { publicClient, sendRelayerTx } from "./chain.js";
 
 export interface KeeperResult {
   scanned: number;
@@ -81,18 +81,19 @@ export async function keeperTick(): Promise<KeeperResult> {
   return result;
 }
 
-/** Send executeOrder for one id from the relayer wallet, returning the tx hash. */
+/**
+ * Send executeOrder for one id from the relayer wallet, returning the tx hash.
+ * Behind the shared send queue, because the same wallet is also filling event
+ * orders, advancing playbooks and locking vault money, and two of those sending
+ * at once used to collide on the nonce and look like a refused fill.
+ */
 async function fillOrder(id: bigint): Promise<`0x${string}`> {
-  const wallet = relayerWallet();
-  const data = encodeFunctionData({
-    abi: abis.orderBook,
-    functionName: "executeOrder",
-    args: [id],
-  });
-  return wallet.sendTransaction({
-    account: wallet.account!,
-    chain: wallet.chain,
+  return sendRelayerTx({
     to: addresses.orderBook,
-    data,
+    data: encodeFunctionData({
+      abi: abis.orderBook,
+      functionName: "executeOrder",
+      args: [id],
+    }),
   });
 }

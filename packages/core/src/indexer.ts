@@ -60,8 +60,19 @@ export async function indexOnce(): Promise<ScanResult> {
   }
   const toBlock = fromBlock + MAX_RANGE - 1n > latest ? latest : fromBlock + MAX_RANGE - 1n;
 
+  // Claim the window before scanning it. Two indexers reading the same bookmark
+  // both scanned the same blocks and both wrote the same rows; the (tx_hash,
+  // log_index) key meant nothing was double counted, so the only cost was a pile
+  // of wasted getLogs calls against a public RPC with a rate limit. Moving the
+  // bookmark first, conditional on it still saying what we read, means the loser
+  // skips the window instead. The trade is that a crash mid-scan loses that
+  // window's rows rather than replaying them, which the backfill below picks up
+  // anyway and which is the cheaper of the two failures.
+  if (!(await claimWindow(bookmark, toBlock))) {
+    return { fromBlock, toBlock: bookmark, rows: 0 };
+  }
+
   const rows = await scanRange(fromBlock, toBlock);
-  await writeBookmark(toBlock);
   return { fromBlock, toBlock, rows };
 }
 
@@ -379,11 +390,26 @@ async function readBookmark(): Promise<bigint> {
   return DEPLOY_BLOCK - 1n;
 }
 
-async function writeBookmark(block: bigint): Promise<void> {
+/**
+ * Move the bookmark from exactly where we read it to the end of the window we
+ * are about to scan, and say whether we won. A compare-and-swap rather than a
+ * plain write, so only one of several indexers can take any given window.
+ *
+ * The seed is separate and deliberately not a swap: on a fresh database there is
+ * no value to compare against, and folding that case into the swap made a loser
+ * unable to tell "I claimed this" from "somebody claimed exactly this", which
+ * is precisely the pair that has to be distinguishable.
+ */
+async function claimWindow(from: bigint, to: bigint): Promise<boolean> {
   await q(
-    `INSERT INTO indexer_state (key, value, updated_at)
-       VALUES ($1, $2, now())
-     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()`,
-    [BOOKMARK_KEY, block.toString()],
+    `INSERT INTO indexer_state (key, value, updated_at) VALUES ($1, $2, now())
+     ON CONFLICT (key) DO NOTHING`,
+    [BOOKMARK_KEY, from.toString()],
   );
+  const claimed = await q<{ key: string }>(
+    `UPDATE indexer_state SET value=$2, updated_at=now()
+      WHERE key=$1 AND value=$3 RETURNING key`,
+    [BOOKMARK_KEY, to.toString(), from.toString()],
+  );
+  return claimed.length === 1;
 }

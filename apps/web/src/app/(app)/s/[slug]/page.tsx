@@ -8,7 +8,7 @@
  *
  * Forking copies the plan into your own vault at your own size, and it lands
  * unarmed. Deciding to put money behind someone else's idea stays a separate,
- * deliberate act — which is the only reason a link like this is safe to pass around.
+ * deliberate act, which is the only reason a link like this is safe to pass around.
  *
  * The author's size says nothing about this person's vault, so a forked event
  * order is costed against it before the button will go: an event order starts

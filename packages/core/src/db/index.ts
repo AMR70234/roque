@@ -179,7 +179,7 @@ CREATE TABLE IF NOT EXISTS event_orders (
   amount_is_percent  BOOLEAN NOT NULL DEFAULT false,
   slippage_bps       INTEGER NOT NULL DEFAULT 100,
   status             TEXT NOT NULL DEFAULT 'screening'
-                       CHECK (status IN ('screening','screened','rejected','armed','filled','failed','expired','cancelled')),
+                       CHECK (status IN ('screening','screened','rejected','armed','firing','filled','failed','expired','cancelled')),
   screen_verdict     TEXT CHECK (screen_verdict IN ('verifiable','unverifiable')),
   screen_reason      TEXT,
   screen_confidence  TEXT,
@@ -303,14 +303,19 @@ CREATE INDEX IF NOT EXISTS idx_proposals_inbox ON proposals (user_address, statu
 -- the part of their vault that is spoken for, which is subtracted before a new
 -- order is allowed and before a withdrawal is signed.
 --
--- Two things worth being honest about. First, this is a ledger and not a lock:
--- AgentExecutor.withdraw will still pay out the whole balance to anyone who
--- calls it directly, because the deployed contract has no idea this table
--- exists. It closes the hole in the app, not on the chain. Second, a percentage
--- order cannot be reserved as a number, because its size is decided at fire
--- time against whatever the balance is then; those rows record the share and
--- reserve nothing, and are reported as a claim on the token rather than an
--- amount.
+-- This table used to be the hold itself, and the caveat printed here was that a
+-- row is not a lock: AgentExecutor.withdraw paid out the whole balance to anyone
+-- who called it directly, and an ordinary autonomous trade could spend the same
+-- money and withdraw whatever it bought. The executor owns the hold now, in
+-- lockedBalance, so what is left here is the story rather than the custody:
+-- which order promised what, which rung of which plan, and whether the figure
+-- came from a percentage somebody typed. The amounts are read off the chain. If
+-- a row and the chain ever disagree, the chain is right by construction.
+--
+-- commitment_id is the keccak of (source_kind, source_id, step_index), which is
+-- also how the executor keys the lock. Deriving it rather than minting one means
+-- arming the same order twice names the same commitment and resizes one hold
+-- instead of stacking two, and there is no id that can drift out of step.
 CREATE TABLE IF NOT EXISTS vault_reservations (
   id            TEXT PRIMARY KEY,
   user_address  TEXT NOT NULL,
@@ -329,6 +334,8 @@ CREATE TABLE IF NOT EXISTS vault_reservations (
   step_index    INTEGER NOT NULL DEFAULT 0,
   status        TEXT NOT NULL DEFAULT 'held'
                   CHECK (status IN ('held','spent','released')),
+  -- The executor's key for this hold, derived from the three columns above.
+  commitment_id TEXT,
   released_at   TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- One claim per rung per source. Arming a playbook twice, or a keeper running
@@ -355,8 +362,27 @@ CREATE INDEX IF NOT EXISTS idx_vault_res_source
 -- turned a sentence into a live commitment with nobody pressing anything.
 ALTER TABLE event_orders DROP CONSTRAINT IF EXISTS event_orders_status_check;
 ALTER TABLE event_orders ADD CONSTRAINT event_orders_status_check
-  CHECK (status IN ('screening','screened','rejected','armed','filled','failed','expired','cancelled'));
+  CHECK (status IN ('screening','screened','rejected','armed','firing','filled','failed','expired','cancelled'));
+
+-- 'firing' is the brief window between claiming an order and knowing what the
+-- swap did. It exists so two workers cannot both fill one verdict: the claim is
+-- a guarded move into this state, and whoever loses it returns without trading.
+-- It also keeps the expiry sweep off a row whose transaction is in the mempool.
+
+-- The executor's key for a hold, on a database that predates commitments.
+ALTER TABLE vault_reservations ADD COLUMN IF NOT EXISTS commitment_id TEXT;
 `;
+
+/**
+ * Postgres errors that mean "somebody else just did this". CREATE TABLE IF NOT
+ * EXISTS is not actually safe to run concurrently: two instances booting
+ * together can both pass the existence check and then collide on the catalogue,
+ * which surfaces as a duplicate relation, type or unique-violation rather than
+ * the no-op the clause implies. The same goes for dropping and re-adding a check
+ * constraint. Every statement here is idempotent by intent, so treating these as
+ * success is honest rather than a shrug.
+ */
+const ALREADY_THERE = /42P07|42710|42P16|23505|already exists|duplicate key/i;
 
 /** Create every table if it is not already there. Safe to call on each boot. */
 export async function ensureSchema(): Promise<void> {
@@ -367,6 +393,11 @@ export async function ensureSchema(): Promise<void> {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   for (const stmt of statements) {
-    await q(stmt);
+    try {
+      await q(stmt);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!ALREADY_THERE.test(message)) throw err;
+    }
   }
 }

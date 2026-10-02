@@ -180,6 +180,8 @@ export type EventOrderStatus =
   | "screened"
   | "rejected"
   | "armed"
+  /** Mid-trade. Brief, and nothing else may touch the order while it lasts. */
+  | "firing"
   | "filled"
   | "failed"
   | "expired"

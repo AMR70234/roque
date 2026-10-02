@@ -1,8 +1,8 @@
 /**
  * Can the vault actually pay for this?
  *
- * Every unattended trade Roque makes — an event order that fires, a playbook
- * rung that comes due — spends from `AgentExecutor.vaultBalance[user][token]`
+ * Every unattended trade Roque makes, an event order that fires or a playbook
+ * rung that comes due, spends from `AgentExecutor.vaultBalance[user][token]`
  * and from nowhere else. The connected wallet is not touched, because the agent
  * has no authority over it. That is a good property right up until someone
  * writes an order against money the agent cannot reach, at which point the
@@ -17,18 +17,22 @@
  * What the balance means is the subtle part. A vault balance is not the same as
  * spendable money once orders can rest for a fortnight: an armed event order has
  * already promised part of it. So the figure this gate compares against is the
- * balance minus everything `reservations.ts` is holding, which is what stops one
- * deposit from backing two orders that each believe they can spend it.
+ * balance minus what the executor is holding for commitments, which is what
+ * stops one deposit from backing two orders that each believe they can spend it.
+ *
+ * That subtraction used to be a sum over a table, and the table was advisory.
+ * It is `AgentExecutor.lockedBalance` now, which is the same number the contract
+ * will refuse a withdrawal or an unrelated trade against. So this gate and the
+ * on-chain refusal cannot drift apart: being short here means being short there.
  *
  * The arithmetic is pure and the chain read is one thin wrapper over it, so the
- * interesting part — which legs the vault is even on the hook for — is testable
+ * interesting part, which legs the vault is even on the hook for, is testable
  * without a node.
  */
 
 import { formatUnits, parseUnits } from "viem";
 import { tokenBySymbol, type TokenMeta } from "@roque/shared";
-import { vaultBalance } from "./intents.js";
-import { heldByToken } from "./reservations.js";
+import { vaultSnapshot } from "./intents.js";
 
 /**
  * One trade's claim on the vault. `where` names it in the refusal: a standalone
@@ -70,8 +74,8 @@ function requireToken(symbol: string): TokenMeta {
  * else is: two rungs that each spend 100 rUSDC straight from the vault need 200
  * sitting there, not 100 twice.
  *
- * A percentage leg cannot be summed — its size is decided at fire time against
- * whatever the balance is then — so all it asks is that the balance not be
+ * A percentage leg cannot be summed, since its size is decided at fire time
+ * against whatever the balance is then, so all it asks is that the balance not be
  * zero, since a percentage of nothing is nothing.
  */
 export function vaultFundingNeeds(legs: FundingLeg[]): FundingNeed[] {
@@ -107,7 +111,7 @@ export function vaultFundingNeeds(legs: FundingLeg[]): FundingNeed[] {
  *
  * `free` is what is actually spendable and `hold` is what resting orders have
  * already promised. When something is held the sentence says so, because "your
- * vault holds 600" is confusing to somebody looking at a balance of 1,000 —
+ * vault holds 600" is confusing to somebody looking at a balance of 1,000, and
  * the missing 400 needs naming, along with how to get it back.
  */
 function shortfall(
@@ -134,6 +138,10 @@ function shortfall(
  * Fail closed on purpose. If the balance cannot be read we do not sign, because
  * "we could not check" is not "it is fine", and the cost of being wrong here is
  * an order that looks live and can never fill.
+ *
+ * It is also no longer the last word. Arming writes an on-chain hold, and the
+ * contract applies this same arithmetic before it will take one. This gate just
+ * gets there first, with a sentence instead of a revert.
  */
 export async function assertVaultFunds(
   user: `0x${string}`,
@@ -147,26 +155,25 @@ export async function assertVaultFunds(
   // boundary: viem rejects a mixed-case address that is not a valid checksum,
   // and a funding gate that throws "invalid address" instead of a verdict is
   // worse than no gate.
+  //
+  // One snapshot rather than a read per needed token. It pulls every token
+  // whether or not this order touches them, which sounds wasteful and is not:
+  // the whole thing is a single multicall, so the alternative is several round
+  // trips to fetch less.
   const owner = user.toLowerCase() as `0x${string}`;
-  const [balances, held] = await Promise.all([
-    Promise.all(needs.map((n) => vaultBalance(owner, requireToken(n.symbol).address))),
-    heldByToken(owner),
-  ]);
+  const snapshot = await vaultSnapshot(owner);
 
   const problems: string[] = [];
-  needs.forEach((need, i) => {
+  for (const need of needs) {
     const token = requireToken(need.symbol);
+    const state = snapshot.get(token.symbol) ?? { balance: 0n, locked: 0n, available: 0n };
     // Money already promised to a resting order is not money this one can
-    // spend. Floored at zero because a direct on-chain withdrawal can leave
-    // claims standing against a balance that is gone, and a negative figure
-    // here would read as credit.
-    const hold = held.get(token.symbol)?.raw ?? 0n;
-    const balance = balances[i];
-    const free = balance > hold ? balance - hold : 0n;
-    if (free < need.raw || (need.needsSome && free === 0n)) {
-      problems.push(shortfall(need, free, token, hold));
+    // spend. The executor floors this the same way, for the same reason: a
+    // negative figure would read as a credit.
+    if (state.available < need.raw || (need.needsSome && state.available === 0n)) {
+      problems.push(shortfall(need, state.available, token, state.locked));
     }
-  });
+  }
 
   if (problems.length > 0) throw new Error(problems.join(" · "));
 }

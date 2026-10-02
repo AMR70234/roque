@@ -17,6 +17,7 @@ contract AgentExecutorTest is Base {
             tokenOut: address(weth),
             amountIn: amountIn,
             minAmountOut: minOut,
+            commitmentId: bytes32(0),
             nonce: nonce,
             deadline: block.timestamp + 1 hours
         });
@@ -245,6 +246,7 @@ contract AgentExecutorTest is Base {
             triggerPrice: 2_400e8,
             triggerAbove: false,
             expiry: uint64(block.timestamp + 2 days),
+            commitmentId: bytes32(0),
             nonce: 100,
             deadline: block.timestamp + 1 hours
         });

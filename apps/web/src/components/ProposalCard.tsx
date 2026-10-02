@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * One proposal from the agent. Title, what it noticed, and — the part that earns
- * the interruption — why. A suggestion without its reasoning is just noise, so
+ * One proposal from the agent. Title, what it noticed, and the part that earns
+ * the interruption: why. A suggestion without its reasoning is just noise, so
  * the rationale is never collapsed.
  *
  * Two buttons and no third option: take it, which builds the thing and hands you

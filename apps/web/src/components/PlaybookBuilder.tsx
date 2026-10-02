@@ -10,7 +10,7 @@
  * says so, because a step whose sentence nobody can check would stall the whole
  * plan behind it.
  *
- * Funding is checked the same way — at arm time on the server, and shown here as
+ * Funding is checked the same way, at arm time on the server, and shown here as
  * you write. A draft is only a plan, so an unfunded one still saves; what it
  * cannot do is arm, and it is better to learn that while the size is still in
  * front of you. The ladder's own output counts: a rung that sells what the rung
@@ -74,7 +74,7 @@ function describe(d: Draft): string {
     case "price":
       return `When ETH goes ${d.direction} $${d.usd}, ${trade}`;
     case "event":
-      return `If ${d.condition || "…"}, ${trade}`;
+      return `If ${d.condition || "..."}, ${trade}`;
     case "delay":
       return `${d.minutes} minutes after the step before, ${trade}`;
     default:

@@ -41,13 +41,17 @@ export default function PlaybooksPage() {
     const pending = toast.push({
       kind: "pending",
       title: "Arming the playbook",
-      detail: "Every event step is screened first. That is a consensus round each, so give it a moment.",
+      detail:
+        "Every event step is screened first, and then the money each rung needs is set aside in the vault contract. That is a consensus round per step and a transaction at the end, so give it a moment.",
     });
     try {
       const { client } = await wallet.getClient();
       await api.armPlaybook(id, address, client);
       toast.dismiss(pending);
-      toast.success("Running", "The keeper walks it from step one.");
+      toast.success(
+        "Running",
+        "The keeper walks it from step one. Each rung's money is held in the vault until that rung trades.",
+      );
       books.refresh();
     } catch (err) {
       toast.dismiss(pending);

@@ -8,7 +8,7 @@
  * The buckets differ from the event ones because a playbook's states mean
  * different things. "Running" is the armed plans the keeper is walking. "Failed"
  * stands on its own rather than being folded in with the endings, because a plan
- * that broke mid-ladder is the one worth looking at — it may have traded some
+ * that broke mid-ladder is the one worth looking at, since it may have traded some
  * rungs and not others, and that is a position somebody needs to know about.
  * Drafts are their own bucket too, since a draft is a plan that holds nothing
  * and is waiting on the person rather than on the market.
@@ -64,7 +64,7 @@ export function inGroup(book: Playbook, group: PlaybookGroup): boolean {
 
 /**
  * Counted from `createdAt`, and a row whose date will not parse is kept rather
- * than hidden — losing a plan to a bad timestamp is worse than showing it in
+ * than hidden, because losing a plan to a bad timestamp is worse than showing it in
  * the wrong bucket.
  */
 export function inPeriod(book: Playbook, period: PlaybookPeriod, now = Date.now()): boolean {

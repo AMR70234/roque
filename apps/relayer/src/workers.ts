@@ -6,7 +6,7 @@
  * gas to attempt a fill the contract itself judges valid.
  *
  * Two slower loops sit alongside them. Judgment carries the work that has to ask
- * GenLayer something — screening event conditions, then deciding whether they
+ * GenLayer something: screening event conditions, then deciding whether they
  * came true, and walking playbooks one rung at a time. Proposals is the agent
  * looking over each active vault and writing down what it would do next.
  *
@@ -30,13 +30,13 @@ const KEEPER_INTERVAL_MS = 15_000;
 const INDEX_INTERVAL_MS = 20_000;
 
 // Judgment is on a different clock entirely. A single GenLayer round trip is a
-// write plus a receipt poll — measured at 24 to 36 seconds — and a tick works
+// write plus a receipt poll, measured at 24 to 36 seconds, and a tick works
 // through several rows, so one pass can run for minutes. The interval is the
 // floor on how often we *check*, not a promise about duration; the guard below
 // means a long pass simply runs into the next window instead of stacking.
 const JUDGMENT_INTERVAL_MS = 60_000;
 
-// Proposals ask nothing of GenLayer, so they are cheap — but they are also
+// Proposals ask nothing of GenLayer, so they are cheap, but they are also
 // advice, and advice that rewrites itself every minute reads as noise. Once
 // every ten minutes is plenty for a suggestion the user may act on tomorrow.
 const PROPOSAL_INTERVAL_MS = 10 * 60 * 1000;
@@ -55,12 +55,19 @@ const consoleLogger: Logger = {
  * Wrap a tick so it never overlaps itself and never throws into the timer.
  *
  * setInterval does not wait for an async callback, so a pass that outlives its
- * interval would otherwise have a second copy start underneath it — two workers
+ * interval would otherwise have a second copy start underneath it: two workers
  * reading the same due rows and both acting on them. For the GenLayer loops,
  * where a pass genuinely can run for minutes, that is the difference between
  * one fill and two. A skipped tick costs nothing: the row is still due next
  * time, because due-ness is a database fact rather than something the loop
  * remembers.
+ *
+ * Worth being exact about the scope: this stops a loop overlapping *itself* and
+ * nothing more. The same work also runs from a Vercel cron and, for the keeper,
+ * from a GitHub Action, and no wrapper in this process can see those. The guards
+ * that handle two processes are in the database and on the chain: a claim before
+ * acting, a lease before paying for a consensus round, and a serialised queue in
+ * front of the relayer wallet.
  */
 function serial(name: string, tick: () => Promise<void>, logger: Logger) {
   let running = false;

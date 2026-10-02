@@ -402,7 +402,7 @@ export function ChessCanvas() {
           if (p.timer <= 0) {
             // Begin a glitch transition.
             p.phase = "glitching";
-            // Pick a target cell: 1–5 cells away in a random cardinal direction.
+            // Pick a target cell: 1 to 5 cells away in a random cardinal direction.
             const horiz = Math.random() < 0.5;
             const steps = Math.floor(rnd(1, 6));
             const dir = pickDir();

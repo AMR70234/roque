@@ -177,7 +177,7 @@ export function ChartModal({
         </div>
         <div className="chart-modal-body">
           {loading ? (
-            <p className="chart-modal-empty">Loading price history…</p>
+            <p className="chart-modal-empty">Loading price history...</p>
           ) : error ? (
             <p className="chart-modal-empty" role="status">
               Price history is unavailable right now.

@@ -220,7 +220,7 @@ export function CommandConsole({
           <textarea
             ref={inputRef}
             className="console-textarea"
-            placeholder="Swap 250 USDC into ETH…"
+            placeholder="Swap 250 USDC into ETH..."
             value={value}
             rows={1}
             onChange={(e) => setValue(e.target.value)}

@@ -66,6 +66,31 @@ Autonomous funds are isolated in per-user token vaults. A capability grant
 records the agent signer, per-trade USD cap, UTC-day USD cap, slippage cap,
 expiry, and revocation state.
 
+A vault balance has two halves. `lockedBalance[user][token]` is what commitments
+are holding, and `availableBalance` is the rest. Withdrawals and ordinary agent
+trades may only reach the free half; a trade naming the commitment it fulfils
+spends that, and the hold ends in the same transaction. Nothing else can move
+committed money, which is the property the off-chain ledger could not provide:
+a row shut the app's withdraw button and left an autonomous swap free to spend
+the same balance and walk out with the other token.
+
+A commitment is written by the capability's agent signer on an EIP-712
+`CommitIntent`, keyed by a `commitmentId` the backend derives from
+`(source_kind, source_id, step_index)`, so arming the same order twice resizes
+one hold rather than stacking two. A lock is strictly weaker than a spend: it
+moves no tokens, it can only hold money that is already free, it carries an
+`unlockAt` the contract caps at `MAX_LOCK_WINDOW` (120 days), and it is not
+valued in dollars or booked against the daily cap, so a feed outage cannot stop
+somebody arming an order.
+
+Three things can end a hold, and the second and third are what keep it from
+being a trap. The agent signer releases on a signed `ReleaseIntent` carrying the
+commitment's `epoch`, which pins the signature to one particular lock so a
+release written for a cancelled order cannot be replayed against a later one.
+Anyone may release a commitment past its `unlockAt`. And the owner may release
+their own once their capability can no longer spend it, which is to say after
+they revoke, the one move that needs nobody's permission.
+
 The user may submit the grant directly or sign an EIP-712 grant that the
 relayer submits. Each autonomous swap or limit order then requires a separate
 EIP-712 signature from the configured agent signer.
@@ -153,16 +178,31 @@ the deployed Sepolia contracts.
   payable, and refuses a commitment it cannot cover. The arithmetic is pure and
   the chain read is a thin wrapper over it. What it compares against is the
   balance minus everything currently reserved, not the raw balance;
-- `reservations.ts` records the vault money a resting commitment has already
-  promised, so the same deposit cannot back two orders and cannot be withdrawn
-  out from under the order waiting to spend it. A ledger, not a lock: the
-  deployed `AgentExecutor` has no locked-balance concept, so a direct
-  `withdraw` call still pays out in full. It closes the app's path, which is
-  where money actually leaves.
+- `reservations.ts` records which order promised what and drives the matching
+  on-chain hold. It was the hold once, as a table, and the honest caveat printed
+  at the top of it was that a row is not a lock. The executor owns the hold now;
+  what is left here is attribution, so the vault panel can say "committed to 2
+  live orders" rather than show an unexplained number. Figures are read from
+  `AgentExecutor.lockedBalance`, so a row and the chain cannot disagree about an
+  amount.
 
 The database stores interpretation and execution activity, not custody. Stored
 autonomous intents are owner-checked and atomically claimed before signing to
 prevent duplicate execution requests.
+
+Claiming before acting is the general rule, because the judgment work runs in
+more than one process: a Vercel cron, the standalone relayer's loop, and a
+GitHub Action against the keeper. `serial()` stops a loop overlapping itself and
+says nothing about two processes. So an event order moves to `firing` under a
+guarded update before its swap is sent, and the loser of that guard returns
+without trading; screening and verdicts are leased under the same interval the
+selection uses, so one consensus round is bought once; arming claims the status
+before taking the hold and rolls the row back if the chain refuses it; a
+playbook's post-fill writes are guarded on the cursor and on the plan still
+being armed; and anything left mid-trade for ten minutes is failed rather than
+retried, since a retry risks spending twice. Relayer sends are serialised behind
+one queue with a locally tracked nonce, and the indexer claims its block window
+with a compare-and-swap.
 
 The judgment features add six append-only tables: `event_orders`, `playbooks`,
 `playbook_events`, `shares`, and `proposals`. They hold intent and reasoning,
@@ -247,7 +287,7 @@ Both modes use the same on-chain authorization.
    before verifiability, because a consensus round is the expensive refusal and
    this is the cheap one. The read fails closed: an unreadable balance is not
    consent.
-3. Arming writes a reservation, so the money is promised as well as checked --
+3. Arming writes an on-chain hold, so the money is promised as well as checked --
    arming rather than creating, for both features, because a screened order and
    a draft plan are both waiting on the user and holding a balance against
    either would lock up a vault for something that never goes live. Open claims
@@ -308,6 +348,10 @@ JSON contain the user-facing addresses and token/pool registry.
 - The relayer and keeper are centralized off-chain services, bounded by
   on-chain authorization.
 - GenLayer-to-Sepolia writes are relayed off-chain; there is no trustless bridge.
+- A vault hold depends on the relayer to release it on the ordinary paths. The
+  two exits that do not are the `unlockAt` expiry and revoking the capability,
+  so the worst a dead or hostile relayer can do is make somebody wait or make
+  them revoke. It cannot keep their money.
 - Event-order verdicts are only as good as the evidence a validator can reach.
   Evidence gathering is public news and price feeds over nondeterministic web
   access, so a true event that no reachable source reports reads as not met.

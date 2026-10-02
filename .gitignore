@@ -2,7 +2,7 @@
 node_modules/
 .pnpm-store/
 
-# env & secrets — NEVER COMMIT
+# env & secrets, NEVER COMMIT
 .env*
 !.env.example
 

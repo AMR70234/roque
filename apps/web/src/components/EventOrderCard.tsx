@@ -15,6 +15,7 @@ import { useState } from "react";
 import {
   Ban,
   CalendarClock,
+  Zap,
   Check,
   ChevronDown,
   ExternalLink,
@@ -44,6 +45,9 @@ const STATUS: Record<
   screened: { label: "Ready to arm", tone: "tone-warn", icon: <ShieldCheck size={13} /> },
   rejected: { label: "Refused", tone: "tone-bad", icon: <ShieldAlert size={13} /> },
   armed: { label: "Watching", tone: "tone-live", icon: <Radar size={13} /> },
+  // The condition came true and the trade is in the air. Seconds, usually, but
+  // it is a real state and a card with no label on it looks broken.
+  firing: { label: "Trading now", tone: "tone-live", icon: <Zap size={13} /> },
   filled: { label: "Filled", tone: "tone-live", icon: <Check size={13} /> },
   failed: { label: "Failed", tone: "tone-bad", icon: <Ban size={13} /> },
   expired: { label: "Expired", tone: "tone-warn", icon: <CalendarClock size={13} /> },
@@ -69,6 +73,9 @@ export function EventOrderCard({
   const size = order.amountIsPercent
     ? `${order.amount}% of ${order.tokenIn}`
     : `${formatAmount(order.amount)} ${order.tokenIn}`;
+  // What can still be called off. 'firing' is deliberately out: the swap is
+  // already in the air, and offering a button that the server will turn down is
+  // worse than not offering one for the few seconds it lasts.
   const live =
     order.status === "armed" || order.status === "screening" || order.status === "screened";
   const items = order.evidence?.items ?? [];

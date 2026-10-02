@@ -129,7 +129,7 @@ export default function FaucetPage() {
                 <div className="faucet-card-bal">
                   <span className="faucet-card-bal-label">You hold</span>
                   <span className="faucet-card-bal-num tabular">
-                    {balances.loading && !balances.data ? "—" : formatAmount(balances.data?.[t.symbol] ?? 0)}
+                    {balances.loading && !balances.data ? "-" : formatAmount(balances.data?.[t.symbol] ?? 0)}
                   </span>
                 </div>
 

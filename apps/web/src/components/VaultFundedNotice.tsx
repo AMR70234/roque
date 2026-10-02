@@ -7,7 +7,7 @@
  * agent has to spend from something it holds authority over: the vault, and
  * nothing else. The connected wallet is untouched by design. That is a good
  * property and an invisible one, so this states it on both screens instead of
- * leaving people to infer it from a balance that never moves — or, worse, to
+ * leaving people to infer it from a balance that never moves, or worse, to
  * discover it from a refusal.
  *
  * It shows what is actually in there, because "your vault funds this" and "your

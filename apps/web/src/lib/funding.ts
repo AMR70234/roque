@@ -1,11 +1,12 @@
 /**
  * The vault-funding check, browser side.
  *
- * `@roque/core` owns the real one: it reads the chain and it is what actually
- * refuses an order. That refusal is correct but late — it arrives as a toast
- * after a click, on a form the person has already finished filling in. This is
- * the same arithmetic run against the vault balance the app is already polling,
- * so the button can be plainly unavailable with the reason next to it instead.
+ * `@roque/core` owns the real one: it reads the chain, and behind it the
+ * executor itself will not take a hold the vault cannot cover. That refusal is
+ * correct but late. It arrives as a toast after a click, on a form the person
+ * has already finished filling in. This is the same arithmetic run against the
+ * vault balance the app is already polling, so the button can be plainly
+ * unavailable with the reason next to it instead.
  *
  * The two halves are deliberately kept in step, including the awkward part: a
  * rung that spends what an earlier rung bought is funded by the ladder itself
@@ -18,7 +19,8 @@
  * What it compares against is `availableRaw` rather than the plain balance, for
  * the same reason the server does: an armed event order has already promised
  * part of the vault, and money promised twice is money one of the two orders
- * will not get.
+ * will not get. That figure is the executor's own locked balance, so it is the
+ * same number the chain will measure a withdrawal against.
  */
 
 import { formatUnits, parseUnits } from "viem";

@@ -47,7 +47,7 @@ export function formatPrice(value: number): string {
 export function shorten(hex: string, lead = 6, tail = 4): string {
   if (!hex) return "";
   if (hex.length <= lead + tail + 2) return hex;
-  return `${hex.slice(0, lead)}…${hex.slice(-tail)}`;
+  return `${hex.slice(0, lead)}...${hex.slice(-tail)}`;
 }
 
 /** A friendly relative time, past tense, for a feed. */

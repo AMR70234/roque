@@ -84,7 +84,7 @@ export function MarketBar({
               <span className="rotator-name">{token.name.replace(/^Roque\s+/u, "")}</span>
               <span className="rotator-sep">|</span>
               <span className="tabular rotator-price">
-                {loading && !data ? "—" : price ? `$${formatPrice(price)}` : "—"}
+                {loading && !data ? "-" : price ? `$${formatPrice(price)}` : "-"}
               </span>
             </div>
           ) : null}

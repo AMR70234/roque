@@ -205,7 +205,7 @@ export function IntentCard({
   };
 
   const statusLabel = (): string => {
-    if (state === "working") return mode === "autonomous" ? "Roque is trading…" : "Submitting…";
+    if (state === "working") return mode === "autonomous" ? "Roque is trading..." : "Submitting...";
     if (state === "done") return isLimit ? "Order placed" : "Trade done";
     return "Didn't go through";
   };

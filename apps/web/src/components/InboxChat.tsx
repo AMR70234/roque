@@ -3,7 +3,7 @@
 /**
  * A small read-only chat under the inbox. It answers questions about things the
  * app already has in hand: live prices, your balances, your vault, your recent
- * trades, your open orders, and the two judgment surfaces — the event orders you
+ * trades, your open orders, and the two judgment surfaces: the event orders you
  * are watching and the playbooks the keeper is walking. It never suggests a trade
  * and never calls the agent, so there is nothing here that can sign or spend.
  * Anything that asks for advice or a prediction gets a plain refusal instead of
@@ -13,7 +13,7 @@
  * trip: a question is matched against the patterns below and answered from the
  * shared store. That is the whole design, and the reason the reply is instant.
  * The event and playbook rows come from `AppData` for the same reason the prices
- * do — their own screens already poll them, so the chat reads the same copy
+ * do, since their own screens already poll them, so the chat reads the same copy
  * rather than opening its own.
  */
 

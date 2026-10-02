@@ -60,7 +60,7 @@ export default function EventsPage() {
       if (res.order.status === "screened") {
         toast.success(
           "The validators can check it",
-          "Arm it when you are ready. Nothing is set aside, and nothing can fill, until you do.",
+          "Arm it when you are ready. Nothing is held, and nothing can fill, until you do.",
         );
       } else {
         toast.info("Refused, and here is why", res.order.screenReason ?? "Nothing could check it.");
@@ -82,15 +82,28 @@ export default function EventsPage() {
   const arm = async (id: string) => {
     if (!address) return;
     setBusy(id);
+    // Arming writes a hold into the vault contract and waits for it, so this is
+    // a transaction and not an instant. Saying so beats a button that sits
+    // there looking stuck for half a minute.
+    const pending = toast.push({
+      kind: "pending",
+      title: "Arming the order",
+      detail: "Setting the money aside in the vault contract. This is a transaction, so give it a moment.",
+    });
     try {
       const { client } = await wallet.getClient();
       await api.armEventOrder(id, address, client);
-      toast.success("Armed and watching", "Roque will look for evidence on every keeper pass.");
+      toast.dismiss(pending);
+      toast.success(
+        "Armed and watching",
+        "The vault is holding this order's money now, so nothing else can spend it. Roque looks for evidence on every pass.",
+      );
       orders.refresh();
       // The vault now holds this order's money, so the panels that show a
       // balance need to catch up rather than wait for their next tick.
       refreshAll();
     } catch (err) {
+      toast.dismiss(pending);
       toast.error("It would not arm", (err as Error).message);
       orders.refresh();
     } finally {
@@ -104,7 +117,7 @@ export default function EventsPage() {
     try {
       const { client } = await wallet.getClient();
       await api.cancelEventOrder(id, address, client);
-      toast.info("Called off", "Nothing will fill from that one.");
+      toast.info("Called off", "Nothing will fill from that one, and its money is free again.");
       orders.refresh();
       refreshAll();
     } catch (err) {
@@ -115,7 +128,7 @@ export default function EventsPage() {
   };
 
   const rows = orders.data ?? [];
-  const watching = rows.filter((o) => o.status === "armed").length;
+  const watching = rows.filter((o) => o.status === "armed" || o.status === "firing").length;
   const shown = filterEventOrders(rows, group, period);
 
   return (

@@ -8,7 +8,7 @@
  *
  * Two independent narrowings, because they answer different questions. The
  * status row answers "what state is it in", and the seven statuses collapse into
- * the four a person actually thinks in — the two pre-arm states (screening and
+ * the four a person actually thinks in. The two pre-arm states (screening and
  * refused) are one bucket, and the three ways an order ends without filling are
  * another. The period row answers "when did I write it", counted from the
  * order's own creation rather than its last update, so an order does not move
@@ -32,7 +32,7 @@ export type EventPeriod = "all" | "24h" | "7d" | "30d";
  */
 export const EVENT_GROUPS: Record<EventGroup, EventOrder["status"][] | null> = {
   all: null,
-  watching: ["armed"],
+  watching: ["armed", "firing"],
   executed: ["filled"],
   // Three ways an order ends without trading, which a person reads as one thing:
   // it is over and nothing happened.
@@ -76,7 +76,7 @@ export function inGroup(order: EventOrder, group: EventGroup): boolean {
 
 /**
  * Was this order written inside the window? Counted from `createdAt`, and a row
- * whose date will not parse is kept rather than hidden — losing an order to a
+ * whose date will not parse is kept rather than hidden, because losing an order to a
  * bad timestamp is worse than showing it in the wrong bucket.
  */
 export function inPeriod(order: EventOrder, period: EventPeriod, now = Date.now()): boolean {

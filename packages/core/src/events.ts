@@ -552,7 +552,14 @@ export async function armEventOrder(id: string, user: string): Promise<EventOrde
         amountIsPercent: row.amount_is_percent,
         source: "event_order",
         sourceId: id,
-        holdUntil: row.expires_at ? new Date(row.expires_at) : undefined,
+        // The hold is given two days beyond the order's own clock. They are
+        // the same deadline otherwise, and an order filling in the last
+        // moments of its life would find its hold already lapsed and refuse
+        // itself. The sweep releases the hold when the order expires, so the
+        // slack only matters if the sweep never runs.
+        holdUntil: row.expires_at
+          ? new Date(new Date(row.expires_at).getTime() + 2 * 24 * 60 * 60 * 1000)
+          : undefined,
       },
     ]);
   } catch (err) {

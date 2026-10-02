@@ -34,11 +34,16 @@ contract Base is Test {
     address internal agentSigner = vm.addr(0xA6E77);
 
     bytes32 internal constant SWAP_INTENT_TYPEHASH = keccak256(
-        "SwapIntent(address user,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint256 nonce,uint256 deadline)"
+        "SwapIntent(address user,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,bytes32 commitmentId,uint256 nonce,uint256 deadline)"
     );
     bytes32 internal constant LIMIT_INTENT_TYPEHASH = keccak256(
-        "LimitIntent(address user,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint256 triggerPrice,bool triggerAbove,uint64 expiry,uint256 nonce,uint256 deadline)"
+        "LimitIntent(address user,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint256 triggerPrice,bool triggerAbove,uint64 expiry,bytes32 commitmentId,uint256 nonce,uint256 deadline)"
     );
+    bytes32 internal constant COMMIT_INTENT_TYPEHASH = keccak256(
+        "CommitIntent(address user,address token,uint256 amount,uint64 unlockAt,bytes32 commitmentId,uint256 nonce,uint256 deadline)"
+    );
+    bytes32 internal constant RELEASE_INTENT_TYPEHASH =
+        keccak256("ReleaseIntent(address user,bytes32 commitmentId,uint32 epoch,uint256 deadline)");
     bytes32 internal constant GRANT_TYPEHASH = keccak256(
         "Grant(address user,address agentSigner,uint256 maxPerTradeUsd,uint256 maxDailyUsd,uint256 maxSlippageBps,uint64 validUntil,uint256 grantNonce)"
     );
@@ -103,6 +108,7 @@ contract Base is Test {
                 i.tokenOut,
                 i.amountIn,
                 i.minAmountOut,
+                i.commitmentId,
                 i.nonce,
                 i.deadline
             )
@@ -127,12 +133,74 @@ contract Base is Test {
                 i.triggerPrice,
                 i.triggerAbove,
                 i.expiry,
+                i.commitmentId,
                 i.nonce,
                 i.deadline
             )
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _digest(structHash));
         return abi.encodePacked(r, s, v);
+    }
+
+    function _signCommit(uint256 pk, AgentExecutor.CommitIntent memory i)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                COMMIT_INTENT_TYPEHASH,
+                i.user,
+                i.token,
+                i.amount,
+                i.unlockAt,
+                i.commitmentId,
+                i.nonce,
+                i.deadline
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _digest(structHash));
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _signRelease(uint256 pk, AgentExecutor.ReleaseIntent memory i)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(RELEASE_INTENT_TYPEHASH, i.user, i.commitmentId, i.epoch, i.deadline)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _digest(structHash));
+        return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev Lock `amount` of a token for `id` as the agent, the way the relayer
+    /// does when somebody arms an order.
+    function _commit(address user, address token, uint256 amount, bytes32 id, uint256 nonce)
+        internal
+    {
+        AgentExecutor.CommitIntent memory intent = AgentExecutor.CommitIntent({
+            user: user,
+            token: token,
+            amount: amount,
+            unlockAt: uint64(block.timestamp + 14 days),
+            commitmentId: id,
+            nonce: nonce,
+            deadline: block.timestamp + 1 hours
+        });
+        executor.lockForCommitment(intent, _signCommit(agentPk, intent));
+    }
+
+    /// @dev Hand a commitment back as the agent, the way a cancel does.
+    function _uncommit(address user, bytes32 id) internal {
+        AgentExecutor.ReleaseIntent memory intent = AgentExecutor.ReleaseIntent({
+            user: user,
+            commitmentId: id,
+            epoch: executor.getCommitment(id).epoch,
+            deadline: block.timestamp + 1 hours
+        });
+        executor.releaseCommitment(intent, _signRelease(agentPk, intent));
     }
 
     /// @dev Give a user a funded vault ready for agent trades.

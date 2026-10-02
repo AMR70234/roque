@@ -34,7 +34,7 @@ export function VaultFundedNotice({ what }: { what: string }) {
       </span>
       <div className="vault-note-body">
         <p className="vault-note-line">
-          {what} trade from your <strong>agent vault</strong> &mdash; never from your connected
+          {what} trade from your <strong>agent vault</strong>, never from your connected
           wallet. They fire when you are not here, so the agent can only spend what you have
           already handed it. Anything it wins lands back in the vault.
         </p>
@@ -42,7 +42,7 @@ export function VaultFundedNotice({ what }: { what: string }) {
         {address ? (
           <div className="vault-note-hold">
             {vault.loading && !vault.data ? (
-              <span className="vault-note-empty">Reading your vault&hellip;</span>
+              <span className="vault-note-empty">Reading your vault...</span>
             ) : held.length > 0 ? (
               <>
                 <span className="vault-note-label">In the vault now</span>

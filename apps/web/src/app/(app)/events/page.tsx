@@ -20,7 +20,7 @@
 import { useState } from "react";
 import { Radar, RefreshCw } from "lucide-react";
 import { useAppData } from "@/providers/AppData";
-import { api } from "@/lib/api";
+import { api, StillWorkingError } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
 import { VaultFundedNotice } from "@/components/VaultFundedNotice";
@@ -45,30 +45,102 @@ export default function EventsPage() {
 
   const live = address && sessionReady;
 
+  /**
+   * How long to keep watching a screen that outlived its request, and how often
+   * to look. A round measures 23-68s and the judgment loop retries a stranded
+   * one within five minutes, so six minutes of watching covers both the slow
+   * tail and one pass of the fallback.
+   */
+  const SCREEN_WATCH_MS = 6 * 60 * 1000;
+  const SCREEN_POLL_MS = 5_000;
+
+  /**
+   * Report what a screen decided, once it has decided anything.
+   *
+   * Reading the row rather than the response is the point. A screen is a
+   * consensus round that outlives its own request often enough to matter, and
+   * the previous shape treated that as a failure: the request 504'd, the person
+   * was told their order was untouched and to press again, and pressing again
+   * inside two minutes hit the lease that stops two workers buying the same
+   * round, returned the row unchanged, and fell into an else branch that
+   * announced "Refused, and here is why. Nothing could check it." The order had
+   * not been refused at all. So the verdict now comes from the order's own
+   * status, whichever way the request went.
+   */
+  const watchScreen = async (id: string): Promise<void> => {
+    const deadline = Date.now() + SCREEN_WATCH_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, SCREEN_POLL_MS));
+      if (!address) return;
+      try {
+        const { client } = await wallet.getClient();
+        const { orders: rows } = await api.eventOrders(address, client);
+        const row = rows.find((o) => o.id === id);
+        if (!row || row.status === "screening") continue;
+        orders.refresh();
+        report(row.status, row.screenReason);
+        return;
+      } catch {
+        // A poll that fails is not news. The next one is five seconds away.
+      }
+    }
+    orders.refresh();
+    toast.info(
+      "Still with the validators",
+      "The round is taking longer than usual. It keeps running without you, and the order updates itself the moment there is a verdict.",
+    );
+  };
+
+  /** The one place a screening outcome turns into a sentence. */
+  const report = (status: string, reason: string | null) => {
+    if (status === "screened") {
+      toast.success(
+        "The validators can check it",
+        "Arm it when you are ready. Nothing is held, and nothing can fill, until you do.",
+      );
+      return;
+    }
+    if (status === "rejected") {
+      toast.info("Refused, and here is why", reason ?? "No public source could settle it.");
+      return;
+    }
+    // Anything else means the order moved on without us, which is worth saying
+    // plainly rather than guessing at.
+    toast.info("That order has moved on", `It now reads as ${status}.`);
+  };
+
   const screen = async (id: string) => {
     if (!address) return;
     setBusy(id);
     const pending = toast.push({
       kind: "pending",
       title: "Asking the validators",
-      detail: "Can this sentence be checked at all? A consensus round takes about half a minute.",
+      detail: "Can this sentence be checked at all? A consensus round usually takes under a minute.",
     });
     try {
       const { client } = await wallet.getClient();
       const res = await api.screenEventOrder(id, address, client);
       toast.dismiss(pending);
-      if (res.order.status === "screened") {
-        toast.success(
-          "The validators can check it",
-          "Arm it when you are ready. Nothing is held, and nothing can fill, until you do.",
-        );
-      } else {
-        toast.info("Refused, and here is why", res.order.screenReason ?? "Nothing could check it.");
-      }
       orders.refresh();
+      if (res.order.status === "screening") {
+        // The round is running: either ours, or one a worker already had in
+        // flight when we asked. Either way the answer is coming.
+        await watchScreen(id);
+      } else {
+        report(res.order.status, res.order.screenReason);
+      }
     } catch (err) {
       toast.dismiss(pending);
-      toast.error("The screen did not finish", (err as Error).message);
+      if (err instanceof StillWorkingError) {
+        toast.info(
+          "Still running",
+          "A consensus round outlasted the request. Nothing is lost and the order is untouched; this screen keeps watching for the verdict.",
+        );
+        await watchScreen(id);
+      } else {
+        toast.error("The screen did not finish", (err as Error).message);
+        orders.refresh();
+      }
     } finally {
       setBusy(null);
     }

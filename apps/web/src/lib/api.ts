@@ -28,6 +28,19 @@ import type {
 } from "./types";
 import type { Account, WalletClient } from "viem";
 
+/**
+ * The request outlived its serverless function. Thrown rather than returned
+ * because every caller must decide something: a consensus round that is still
+ * running is a delay to wait out, and treating it as an error told people their
+ * order had failed when it was going perfectly well.
+ */
+export class StillWorkingError extends Error {
+  constructor() {
+    super("That is taking longer than one request can stay open.");
+    this.name = "StillWorkingError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -60,16 +73,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const err = (body as { error?: unknown }).error;
     if (typeof err === "string") throw new Error(err);
-    // A screen is a consensus round and the long pole in this app, so the one
-    // status people will actually hit gets its own sentence rather than the
-    // generic one.
+    // A platform timeout is not a failure, it is a request that outlived its
+    // function while the work carried on. Raised as its own type so a caller
+    // can wait the work out instead of reporting a problem that is not one.
     if (res.status === 504 || res.status === 408) {
-      // The order is genuinely untouched: a screen that times out leaves the
-      // row in 'screening', and the keeper picks those up on its own pass. So
-      // this is a delay, not a failure, and it should not read like one.
-      throw new Error(
-        "That took longer than the server would wait. A verifiability screen is a consensus round across validators, and a slow one outlasts the request. Your order is untouched and still queued \u2014 the keeper screens it within a few minutes, or you can press Screen it again.",
-      );
+      throw new StillWorkingError();
     }
     throw new Error(
       res.status >= 500

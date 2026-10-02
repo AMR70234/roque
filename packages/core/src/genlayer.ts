@@ -86,6 +86,10 @@ function parseJson<T>(raw: unknown, fallback: T): T {
  * the model across validators is expensive to lose to a flaky socket, so we give
  * the network call a few attempts before surfacing the error. Writes are keyed by
  * requestId and the contract overwrites in place, so a retry never duplicates.
+ *
+ * This is for the short calls only: a submit and a read. Waiting for consensus
+ * has its own deadline-bounded loop below, because retrying a long poll by
+ * restarting it is how you build something that cannot finish.
  */
 async function withRetry<T>(what: string, fn: () => Promise<T>): Promise<T> {
   let lastErr: unknown;
@@ -110,6 +114,52 @@ function isTransient(err: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * How long we will wait for a receipt, in total, whatever goes wrong while
+ * waiting. Sized to sit comfortably inside the 300s a serverless route gets,
+ * with room for the evidence gathering and the database writes around it.
+ */
+const RECEIPT_BUDGET_MS = 200_000;
+
+/**
+ * Wait for a consensus round to land, under one deadline.
+ *
+ * This used to be `withRetry` wrapped around a thirty-poll wait, which is a
+ * worse idea than it looks: the inner wait is itself allowed two minutes, and a
+ * dropped socket at minute two started the whole two minutes again, up to four
+ * times. Eight minutes of waiting inside a function that is killed at five is
+ * not a retry policy, it is a guarantee of never finishing.
+ *
+ * So the budget is counted once, from the top, and every failure in between is
+ * just another reason to poll again. There is no error from "is this mined yet"
+ * that is worth giving up on earlier than the deadline, which is why this
+ * catches everything rather than sorting errors into transient and fatal.
+ */
+async function waitForReceipt(
+  gl: GLClient,
+  // Taken as whatever writeContract returned, so the GenLayer SDK's own hash
+  // type flows through rather than being restated and drifting from it.
+  hash: Parameters<GLClient["waitForTransactionReceipt"]>[0]["hash"],
+  what: string,
+  budgetMs = RECEIPT_BUDGET_MS,
+): Promise<unknown> {
+  const deadline = Date.now() + budgetMs;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    try {
+      return await gl.waitForTransactionReceipt({ hash, retries: 8, interval: 3000 });
+    } catch (err) {
+      lastErr = err;
+      if (Date.now() >= deadline) break;
+      await sleep(2000);
+    }
+  }
+  const detail = lastErr instanceof Error ? lastErr.message.split("\n")[0] : String(lastErr);
+  throw new Error(
+    `GenLayer ${what} did not reach consensus within ${Math.round(budgetMs / 1000)}s: ${detail}`,
+  );
 }
 
 const REFUSAL: Interpretation = {
@@ -148,9 +198,7 @@ export async function interpret(
     }),
   );
 
-  await withRetry("interpret wait", () =>
-    gl.waitForTransactionReceipt({ hash: txHash, retries: 30, interval: 4000 }),
-  );
+  await waitForReceipt(gl, txHash, "interpret");
 
   const raw = await withRetry("interpret read", () =>
     gl.readContract({
@@ -197,9 +245,7 @@ export async function adjudicate(
     }),
   );
 
-  await withRetry("adjudicate wait", () =>
-    gl.waitForTransactionReceipt({ hash: txHash, retries: 30, interval: 4000 }),
-  );
+  await waitForReceipt(gl, txHash, "adjudicate");
 
   const raw = await withRetry("adjudicate read", () =>
     gl.readContract({

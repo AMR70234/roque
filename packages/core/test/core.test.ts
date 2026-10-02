@@ -11,7 +11,17 @@ import { privateKeyToAccount } from "viem/accounts";
 import { eip712Domain, eip712Types } from "@roque/shared";
 import { minOutForSlippage } from "../src/quote.js";
 import { toTriggerPrice } from "../src/prices.js";
-import { signSwapIntent, signLimitIntent, type SwapIntent, type LimitIntent } from "../src/intents.js";
+import {
+  signSwapIntent,
+  signLimitIntent,
+  signCommitIntent,
+  signReleaseIntent,
+  NO_COMMITMENT,
+  type SwapIntent,
+  type LimitIntent,
+  type CommitIntent,
+  type ReleaseIntent,
+} from "../src/intents.js";
 
 // A throwaway key so the test is self-contained. The env var lets intents.ts
 // build the agent account; we assert signatures recover to this same address.
@@ -62,6 +72,7 @@ describe("agent intent signing", () => {
       tokenOut: "0x9b325DcF0C39F620e73707181BB2AdDa0a5B7b8c",
       amountIn: parseUnits("200", 6),
       minAmountOut: parseUnits("0.078", 18),
+      commitmentId: NO_COMMITMENT,
       nonce: 1n,
       deadline: 1_900_000_000n,
     };
@@ -86,6 +97,7 @@ describe("agent intent signing", () => {
       triggerPrice: toTriggerPrice(2500),
       triggerAbove: false,
       expiry: 1_900_000_000n,
+      commitmentId: NO_COMMITMENT,
       nonce: 2n,
       deadline: 1_900_000_000n,
     };
@@ -107,6 +119,7 @@ describe("agent intent signing", () => {
       tokenOut: "0x9b325DcF0C39F620e73707181BB2AdDa0a5B7b8c",
       amountIn: parseUnits("200", 6),
       minAmountOut: 1n,
+      commitmentId: NO_COMMITMENT,
       nonce: 1n,
       deadline: 1_900_000_000n,
     };

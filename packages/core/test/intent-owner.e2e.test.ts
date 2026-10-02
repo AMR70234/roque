@@ -16,6 +16,8 @@ const state = vi.hoisted(() => ({
   freshNonce: vi.fn(),
   agentSignerAddress: vi.fn(),
   vaultBalance: vi.fn(),
+  lockedBalance: vi.fn(),
+  getCommitment: vi.fn(),
   remainingDailyUsd: vi.fn(),
   quoteSwap: vi.fn(),
   minOutForSlippage: vi.fn(),
@@ -32,6 +34,10 @@ vi.mock("../src/intents.js", () => ({
   freshNonce: state.freshNonce,
   agentSignerAddress: state.agentSignerAddress,
   vaultBalance: state.vaultBalance,
+  lockedBalance: state.lockedBalance,
+  getCommitment: state.getCommitment,
+  NO_COMMITMENT:
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
   remainingDailyUsd: state.remainingDailyUsd,
 }));
 vi.mock("../src/genlayer.js", () => ({ interpret: vi.fn() }));
@@ -116,6 +122,7 @@ describe("stored autonomous intent ownership", () => {
     state.agentSignerAddress.mockReturnValue(
       "0x3333333333333333333333333333333333333333",
     );
+    state.lockedBalance.mockResolvedValue(0n);
     state.vaultBalance.mockResolvedValue(10_000_000n);
     state.usdValueRaw.mockResolvedValue(1n * 10n ** 18n);
     state.remainingDailyUsd.mockResolvedValue(2_000n * 10n ** 18n);

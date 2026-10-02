@@ -26,7 +26,22 @@ import { adjudicate } from "./genlayer.js";
 import { preflightVaultSwap, executeVaultSwap } from "./services.js";
 import { gatherEvidence, localScreen, EVENT_CHECK_INTERVAL_MS } from "./events.js";
 import { assertVaultFunds } from "./funding.js";
-import { reserve, release } from "./reservations.js";
+import { commitmentIdFor, reserve, release } from "./reservations.js";
+
+/**
+ * How long a rung's hold should last. Every commitment carries an end, because
+ * the contract will not take an unbounded one, so a plan whose last rung waits
+ * ninety days needs a hold that outlives it. Take the furthest delay the plan
+ * contains and add a month of slack.
+ */
+function holdWindow(steps: PlaybookStep[]): Date {
+  let minutes = 0;
+  for (const step of steps) {
+    if (step.trigger.kind === "delay") minutes += step.trigger.minutes;
+  }
+  const days = Math.min(Math.round(minutes / (60 * 24)) + 30, 115);
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+}
 
 /** How often a waiting step is re-examined. Price is cheap; events are not. */
 export const PLAYBOOK_PRICE_INTERVAL_MS = 30_000;
@@ -359,11 +374,18 @@ export async function armPlaybook(id: string, user: string): Promise<Playbook> {
   // money is claimed. A draft holds nothing, which is why a plan can still be
   // written, shared and forked before the vault could pay for it.
   //
+  // The status moves first and the hold is taken after, which is the opposite of
+  // how this used to read. Claiming first means two requests cannot both arm the
+  // same plan, and it means a failed hold has somewhere to put the plan back:
+  // 'draft', with the contract's reason attached. The other order left the loser
+  // of that race holding money for a plan it never armed.
+  //
   // Only the rungs the vault is on the hook for are claimed, matching the gate
   // above: a step that spends what an earlier step bought is funded by the
   // ladder, and holding vault money for it would double-count the same trade.
   const produced = new Set<string>();
   const claims: Parameters<typeof reserve>[0] = [];
+  const holdUntil = holdWindow(steps);
   for (const [index, step] of steps.entries()) {
     if (!produced.has(step.action.tokenIn)) {
       claims.push({
@@ -374,11 +396,11 @@ export async function armPlaybook(id: string, user: string): Promise<Playbook> {
         source: "playbook",
         sourceId: id,
         stepIndex: index,
+        holdUntil,
       });
     }
     produced.add(step.action.tokenOut);
   }
-  if (claims.length > 0) await reserve(claims);
 
   steps[0].armedAt = new Date().toISOString();
   const armed = await q<PlaybookRow>(
@@ -388,6 +410,21 @@ export async function armPlaybook(id: string, user: string): Promise<Playbook> {
     [id, JSON.stringify(steps)],
   );
   if (!armed[0]) throw new Error("That playbook is no longer a draft.");
+
+  if (claims.length > 0) {
+    try {
+      await reserve(claims);
+    } catch (err) {
+      await q(
+        `UPDATE playbooks SET status='draft', error=$2, updated_at=now()
+          WHERE id=$1 AND status='armed'`,
+        [id, `could not hold the vault money: ${(err as Error).message}`],
+      );
+      await release("playbook", id);
+      throw err;
+    }
+  }
+
   await log(id, 0, "armed", `${steps.length} step${steps.length === 1 ? "" : "s"} armed`);
   return toPlaybook(armed[0]);
 }
@@ -486,6 +523,12 @@ export async function advancePlaybook(id: string): Promise<Playbook> {
       amount: step.action.amount,
       amountIsPercent: step.action.amountIsPercent,
       slippageBps: row.slippage_bps,
+      // The rung spends the hold taken for it at arm time, and the hold ends in
+      // the same transaction. A rung whose input an earlier rung produces took
+      // no hold, so this resolves to a commitment that was never made and the
+      // trade draws on free money instead, which is what the funding gate
+      // already assumed when it skipped that leg.
+      commitmentId: commitmentIdFor("playbook", id, cursor),
     });
     const txHash = await executeVaultSwap(row.user_address as `0x${string}`, plan);
     step.status = "done";
@@ -512,22 +555,33 @@ export async function advancePlaybook(id: string): Promise<Playbook> {
   }
 
   // Hand the clock to the next step so a delay measures from this fill.
+  // Guarded on the cursor we claimed and on the plan still being armed. The
+  // trade has already happened, so this write is bookkeeping; what the guard
+  // prevents is advancing a plan somebody cancelled while the swap was in
+  // flight, which would hand the next rung a clock it should never have got.
   const next = cursor + 1;
   if (steps[next]) steps[next].armedAt = new Date().toISOString();
   const moved = await q<PlaybookRow>(
     `UPDATE playbooks SET steps=$2::jsonb, step_cursor=$3, updated_at=now()
-      WHERE id=$1 RETURNING *`,
-    [id, JSON.stringify(steps), next],
+      WHERE id=$1 AND step_cursor=$4 AND status='armed' RETURNING *`,
+    [id, JSON.stringify(steps), next, cursor],
   );
+  if (!moved[0]) return toPlaybook({ ...row, steps });
   return steps[next] ? toPlaybook(moved[0]) : complete(id, steps);
 }
 
 async function complete(id: string, steps: PlaybookStep[]): Promise<Playbook> {
+  // Guarded, so a plan cancelled mid-walk is not quietly marked completed.
   const rows = await q<PlaybookRow>(
     `UPDATE playbooks SET status='completed', steps=$2::jsonb, updated_at=now()
-      WHERE id=$1 RETURNING *`,
+      WHERE id=$1 AND status='armed' RETURNING *`,
     [id, JSON.stringify(steps)],
   );
+  if (!rows[0]) {
+    const current = await q<PlaybookRow>(`SELECT * FROM playbooks WHERE id=$1`, [id]);
+    await release("playbook", id);
+    return toPlaybook(current[0]);
+  }
   // Belt and braces: each rung releases as it fills, so this is normally a
   // no-op. It catches a claim whose per-step release did not land, which would
   // otherwise hold money against a plan that has finished running.
@@ -597,14 +651,30 @@ export async function playbookLog(id: string, limit = 50): Promise<PlaybookLogEn
 }
 
 export async function cancelPlaybook(id: string, user: string): Promise<Playbook> {
+  // The step clause refuses a cancel while the rung at the cursor is mid-trade.
+  // Without it, cancelling released the hold and marked the plan dead while the
+  // swap spending that hold was still in the mempool, and the trade landed
+  // against a plan that no longer existed. A moment later the rung has settled
+  // and the cancel goes through cleanly.
   const rows = await q<PlaybookRow>(
     `UPDATE playbooks SET status='cancelled', updated_at=now()
       WHERE id=$1 AND LOWER(user_address)=LOWER($2) AND status IN ('draft','armed')
+        AND COALESCE(steps->step_cursor->>'status', '') <> 'firing'
       RETURNING *`,
     [id, user],
   );
   if (rows[0]) await release("playbook", id);
-  if (!rows[0]) throw new Error("That playbook is not yours, or is already finished.");
+  if (!rows[0]) {
+    const current = await q<{ status: string; steps: PlaybookStep[]; step_cursor: number }>(
+      `SELECT status, steps, step_cursor FROM playbooks
+        WHERE id=$1 AND LOWER(user_address)=LOWER($2)`,
+      [id, user],
+    );
+    if (current[0]?.steps?.[current[0].step_cursor]?.status === "firing") {
+      throw new Error("That step is mid-trade. Give it a moment and cancel again.");
+    }
+    throw new Error("That playbook is not yours, or is already finished.");
+  }
   await log(id, rows[0].step_cursor, "cancelled", "cancelled by the owner");
   return toPlaybook(rows[0]);
 }
@@ -616,8 +686,46 @@ export interface PlaybookTickResult {
   errors: string[];
 }
 
+/**
+ * How long a rung may sit mid-trade before we call it lost. Generously past a
+ * Sepolia confirmation, because the cost of being hasty is a second fill.
+ */
+const FIRING_REAP_MINUTES = 10;
+
+/**
+ * A rung stuck at 'firing' means the worker holding it died between sending the
+ * swap and recording what happened. We cannot tell from here whether the trade
+ * landed, so the plan fails rather than retries: a retry risks spending twice,
+ * and the person can read the transaction list and start a fresh plan. The hold
+ * is let go either way, since a commitment the swap already consumed releases as
+ * a no-op and one it never reached should not stay locked.
+ */
+async function reapStuckPlaybooks(result: PlaybookTickResult): Promise<void> {
+  const stuck = await q<{ id: string }>(
+    `UPDATE playbooks SET status='failed',
+        error='A step was interrupted mid-trade. Check your activity for whether it landed, then start a fresh plan.',
+        updated_at=now()
+      WHERE status='armed'
+        AND COALESCE(steps->step_cursor->>'status', '') = 'firing'
+        AND updated_at < now() - ($1 || ' minutes')::interval
+      RETURNING id`,
+    [String(FIRING_REAP_MINUTES)],
+  );
+  for (const { id } of stuck) {
+    try {
+      await release("playbook", id);
+      await log(id, 0, "failed", "interrupted mid-trade");
+    } catch (err) {
+      result.errors.push(`reap ${id}: ${(err as Error).message}`);
+    }
+  }
+}
+
 export async function playbookTick(): Promise<PlaybookTickResult> {
   const result: PlaybookTickResult = { advanced: 0, filled: [], completed: [], errors: [] };
+  await reapStuckPlaybooks(result).catch((err) =>
+    result.errors.push(`reap: ${(err as Error).message}`),
+  );
   const due = await q<{ id: string }>(
     `SELECT id FROM playbooks WHERE status='armed'
       ORDER BY last_checked_at ASC NULLS FIRST LIMIT $1`,

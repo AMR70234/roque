@@ -18,12 +18,24 @@ const state = vi.hoisted(() => ({
   preflightVaultSwap: vi.fn(),
   executeVaultSwap: vi.fn(),
   vaultBalance: vi.fn(),
+  lockedBalance: vi.fn(),
+  freshNonce: vi.fn(),
+  lockCommitments: vi.fn(),
+  releaseCommitments: vi.fn(),
+  getCommitment: vi.fn(),
 }));
 
 vi.mock("../src/db/index.js", () => ({ q: state.q }));
 // Writing an order reads the vault balance. Stubbing the read keeps the real
 // funding gate in the loop with a balance the test chooses.
-vi.mock("../src/intents.js", () => ({ vaultBalance: state.vaultBalance }));
+vi.mock("../src/intents.js", () => ({
+  vaultBalance: state.vaultBalance,
+  lockedBalance: state.lockedBalance,
+  freshNonce: state.freshNonce,
+  lockCommitments: state.lockCommitments,
+  releaseCommitments: state.releaseCommitments,
+  getCommitment: state.getCommitment,
+}));
 vi.mock("../src/genlayer.js", () => ({ adjudicate: state.adjudicate, interpret: vi.fn() }));
 vi.mock("../src/services.js", () => ({
   preflightVaultSwap: state.preflightVaultSwap,
@@ -36,8 +48,14 @@ vi.mock("../src/prices.js", () => ({
   usdValueRaw: vi.fn(),
 }));
 
-const { createEventOrder, screenEventOrder, evaluateEventOrder, cancelEventOrder, armEventOrder } =
-  await import("../src/events.js");
+const {
+  createEventOrder,
+  screenEventOrder,
+  evaluateEventOrder,
+  cancelEventOrder,
+  armEventOrder,
+  eventTick,
+} = await import("../src/events.js");
 
 const user = "0x1111111111111111111111111111111111111111" as const;
 const CHECKABLE = "the Federal Reserve cuts its benchmark interest rate";
@@ -98,12 +116,16 @@ const armed = (over: Record<string, unknown> = {}) =>
 // The real reservations module runs against this, so the ledger's behaviour is
 // exercised rather than stubbed.
 let held: ReturnType<typeof reservationStore>;
+/** Set by the one test that wants the mid-trade reaper to find something. */
+let stranded = false;
 
 beforeEach(() => {
   vi.clearAllMocks();
   held = reservationStore();
+  held.install(state);
   row = baseRow();
   sqls = [];
+  stranded = false;
 
   // A tiny in-memory event_orders table: each UPDATE applies the fields it sets
   // to the one row, so assertions can read the persisted state afterwards.
@@ -120,6 +142,33 @@ beforeEach(() => {
         if (asked !== String(row.user_address).toLowerCase()) return [];
       }
       return [{ ...row }];
+    }
+
+    // The two leases, which keep two workers from buying the same consensus
+    // round, and the claim, which keeps them from both filling one verdict.
+    // Modelled with the real guards rather than waved through, because a mock
+    // that always lets the lease succeed cannot show the second worker losing.
+    if (t.startsWith("UPDATE event_orders SET last_checked_at=now()")) {
+      const screening = t.includes("status='screening'");
+      if (row.status !== (screening ? "screening" : "armed")) return [];
+      const gapMs = screening ? 120_000 : Number(params[1]);
+      const since = row.last_checked_at
+        ? Date.now() - new Date(row.last_checked_at).getTime()
+        : Infinity;
+      const due = screening ? since >= gapMs : row.verdict_met === true || since >= gapMs;
+      if (!due) return [];
+      Object.assign(row, { last_checked_at: new Date().toISOString() });
+      return screening ? [{ id: row.id }] : [{ ...row }];
+    }
+    if (t.includes("SET status='firing'")) {
+      if (row.status !== "armed") return [];
+      Object.assign(row, { status: "firing" });
+      return [{ id: row.id }];
+    }
+    if (t.includes("This order was interrupted mid-trade")) {
+      if (row.status !== "firing" || !stranded) return [];
+      Object.assign(row, { status: "failed" });
+      return [{ id: row.id }];
     }
 
     if (t.startsWith("INSERT INTO event_orders")) {
@@ -175,22 +224,46 @@ beforeEach(() => {
       return [{ ...row }];
     }
     if (t.includes("SET status='expired'")) {
+      // Two statements share this shape. The one inside evaluateEventOrder
+      // names an id and only takes an armed row; the sweep at the end of a tick
+      // takes any armed or screened row past its date. Neither may touch a row
+      // that is mid-trade, which is the whole reason 'firing' exists, so the
+      // guards are modelled rather than waved through.
+      const byId = t.includes("WHERE id=$1");
+      const allowed = byId ? ["armed"] : ["armed", "screened"];
+      if (!allowed.includes(row.status as string)) return [];
+      if (!byId) {
+        const due =
+          row.expires_at !== null && new Date(String(row.expires_at)).getTime() <= Date.now();
+        if (!due) return [];
+      }
       Object.assign(row, { status: "expired" });
-      return [{ ...row }];
+      return byId ? [{ ...row }] : [{ id: row.id }];
     }
     if (t.includes("SET status='filled'")) {
+      if (row.status !== "firing") return [];
       Object.assign(row, { status: "filled", tx_hash: params[1], error: null });
       return [{ ...row }];
+    }
+    // Arming rolled back because the chain would not take the hold.
+    if (t.includes("SET status='screened', error=$2")) {
+      if (row.status !== "armed") return [];
+      Object.assign(row, { status: "screened", error: params[1] });
+      return [];
     }
     if (t.includes("SET status='armed', error=NULL")) {
       Object.assign(row, { status: "armed", error: null });
       return [{ ...row }];
     }
     if (t.includes("SET status='cancelled'")) {
+      // Cancelling is scoped to the states a person can still call off. A row
+      // whose swap is in the mempool is not one of them.
+      if (!["screening", "screened", "armed"].includes(row.status as string)) return [];
       Object.assign(row, { status: "cancelled" });
       return [{ ...row }];
     }
     if (t.includes("SET status=$3, error=$2")) {
+      if (row.status !== "firing") return [];
       Object.assign(row, { status: params[2], error: params[1] });
       return [{ ...row }];
     }
@@ -609,5 +682,109 @@ describe("what an event order promises the vault", () => {
     await cancelEventOrder("ev-1", user);
 
     expect(openClaims()).toHaveLength(0);
+  });
+});
+
+/**
+ * Two workers, one order.
+ *
+ * The judgment work runs in more than one place: a Vercel cron tick, and the
+ * standalone relayer's own loop, and either can be nudged by hand. The `serial`
+ * wrapper in the worker module stops a loop overlapping itself and says nothing
+ * at all about two processes, which is the case that actually costs money. Every
+ * guard below is about the same moment arriving twice.
+ */
+describe("two workers reaching the same order", () => {
+  const met = {
+    met: true,
+    confidence: "high" as const,
+    rationale: "it happened",
+    sources: [],
+  };
+
+  beforeEach(() => {
+    state.ethUsd.mockResolvedValue({ usd: 2500, updatedAt: 0, ageSeconds: 1 });
+    state.preflightVaultSwap.mockResolvedValue({ amountInRaw: 1n, minOut: 1n });
+    state.executeVaultSwap.mockResolvedValue(TX);
+    state.vaultBalance.mockResolvedValue(10_000_000_000n);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(RSS, { status: 200 })));
+  });
+
+  it("fills a met verdict exactly once", async () => {
+    row = baseRow({ status: "armed", verdict_met: true, verdict_confidence: "high" });
+
+    const [first, second] = await Promise.all([
+      evaluateEventOrder("ev-1"),
+      evaluateEventOrder("ev-1"),
+    ]);
+
+    // One trade. Before the claim moved in front of the swap, both of these
+    // traded and only the second found out it had been beaten.
+    expect(state.executeVaultSwap).toHaveBeenCalledTimes(1);
+    expect([first.status, second.status]).toContain("filled");
+  });
+
+  it("buys one consensus round for one check, not two", async () => {
+    row = baseRow({ status: "armed" });
+    state.adjudicate.mockResolvedValue(met);
+
+    await Promise.all([evaluateEventOrder("ev-1"), evaluateEventOrder("ev-1")]);
+
+    // The loser of the lease returns without asking the validators anything.
+    expect(state.adjudicate).toHaveBeenCalledTimes(1);
+  });
+
+  it("screens once however many workers notice the order", async () => {
+    row = baseRow({ status: "screening" });
+    state.adjudicate.mockResolvedValue({ ...met, rationale: "checkable" });
+
+    await Promise.all([screenEventOrder("ev-1"), screenEventOrder("ev-1")]);
+
+    expect(state.adjudicate).toHaveBeenCalledTimes(1);
+  });
+
+  it("will not expire an order whose trade is still in the mempool", async () => {
+    // The sweep used to take any armed row past its date, including one the
+    // fill had already claimed, which released the hold the trade was spending.
+    row = baseRow({ status: "firing", expires_at: "2020-01-01T00:00:00.000Z" });
+
+    const result = await eventTick();
+
+    expect(row.status).toBe("firing");
+    expect(result.errors).toEqual([]);
+  });
+
+  it("will not cancel an order whose trade is still in the mempool", async () => {
+    row = baseRow({ status: "firing" });
+    await expect(cancelEventOrder("ev-1", user)).rejects.toThrow("no longer open");
+    expect(row.status).toBe("firing");
+  });
+
+  it("gives up on an order left mid-trade rather than trading again", async () => {
+    // We cannot tell from here whether the swap landed, so retrying risks
+    // spending twice. Failing is the direction that cannot cost the person
+    // money they did not agree to.
+    row = baseRow({ status: "firing" });
+    stranded = true;
+
+    await eventTick();
+
+    expect(row.status).toBe("failed");
+    expect(state.executeVaultSwap).not.toHaveBeenCalled();
+  });
+});
+
+describe("arming when the hold cannot be taken", () => {
+  it("puts the order back to screened rather than leaving it armed for nothing", async () => {
+    // An armed order with no hold behind it is the original bug wearing a hat:
+    // it looks live, counts for nothing in the funding gate, and the next order
+    // written against the same money is allowed to promise it.
+    row = baseRow({ status: "screened", screen_verdict: "verifiable" });
+    state.vaultBalance.mockResolvedValue(10_000_000_000n);
+    state.lockCommitments.mockRejectedValue(new Error("CommittedVault: 0 free"));
+
+    await expect(armEventOrder("ev-1", user)).rejects.toThrow("CommittedVault");
+    expect(row.status).toBe("screened");
+    expect(row.error).toContain("could not hold the vault money");
   });
 });

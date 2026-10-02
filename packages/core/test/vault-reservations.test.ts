@@ -19,10 +19,22 @@ import { reservationStore } from "./helpers/reservations.js";
 const state = vi.hoisted(() => ({
   q: vi.fn(),
   vaultBalance: vi.fn(),
+  lockedBalance: vi.fn(),
+  freshNonce: vi.fn(),
+  lockCommitments: vi.fn(),
+  releaseCommitments: vi.fn(),
+  getCommitment: vi.fn(),
 }));
 
 vi.mock("../src/db/index.js", () => ({ q: state.q }));
-vi.mock("../src/intents.js", () => ({ vaultBalance: state.vaultBalance }));
+vi.mock("../src/intents.js", () => ({
+  vaultBalance: state.vaultBalance,
+  lockedBalance: state.lockedBalance,
+  freshNonce: state.freshNonce,
+  lockCommitments: state.lockCommitments,
+  releaseCommitments: state.releaseCommitments,
+  getCommitment: state.getCommitment,
+}));
 
 const { reserve, release, heldByToken, availability, assertWithdrawable } = await import(
   "../src/reservations.js"
@@ -40,6 +52,7 @@ let held: ReturnType<typeof reservationStore>;
 beforeEach(() => {
   vi.clearAllMocks();
   held = reservationStore();
+  held.install(state);
   // Resolving a percentage share reads the balance, so every suite needs one.
   state.vaultBalance.mockResolvedValue(USDC(1000));
   state.q.mockImplementation(async (text: string, params: unknown[] = []) => {
@@ -217,15 +230,18 @@ describe("availability", () => {
     expect(state_.available).toBe(USDC(600));
   });
 
-  it("floors at zero rather than reporting a negative as credit", async () => {
-    // Somebody can withdraw directly on-chain, behind this ledger's back, and
-    // leave claims standing against money that is gone. The one thing that must
-    // not happen is a negative reading as spendable.
+  it("cannot be asked to hold money the vault does not have", async () => {
+    // This used to be a test that `available` floors at zero, because a claim
+    // could stand against a balance that had already been withdrawn behind the
+    // ledger's back. The executor owns the hold now and will not take one it
+    // cannot cover, so the state that needed flooring is unreachable: the
+    // promise is refused instead of recorded and quietly ignored later.
     state.vaultBalance.mockResolvedValue(USDC(10));
-    await reserve([
-      { user, token: "rUSDC", amount: "400", source: "event_order", sourceId: "eo-1" },
-    ]);
-    expect((await availability(user, "rUSDC")).available).toBe(0n);
+    await expect(
+      reserve([{ user, token: "rUSDC", amount: "400", source: "event_order", sourceId: "eo-1" }]),
+    ).rejects.toThrow(/CommittedVault/u);
+    expect(held.held()).toHaveLength(0);
+    expect((await availability(user, "rUSDC")).available).toBe(USDC(10));
   });
 
   it("reports the whole balance as free when nothing is promised", async () => {
@@ -329,5 +345,83 @@ describe("assertVaultFunds against held money", () => {
       { user, token: "rWBTC", amount: "1", source: "event_order", sourceId: "eo-1" },
     ]);
     await expect(assertVaultFunds(user, [leg("100")])).resolves.toBeUndefined();
+  });
+});
+
+describe("the hold is the chain's, not the table's", () => {
+  it("reports what the executor is locking, not what the rows add up to", async () => {
+    // The row is the explanation; the lock is the number. A row left behind by
+    // a release that already happened on-chain must not re-create a hold.
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      { user, token: "rUSDC", amount: "400", source: "event_order", sourceId: "eo-1" },
+    ]);
+    held.hold({ user_address: user, token: "rUSDC", amount_raw: String(USDC(900)) });
+    expect((await heldByToken(user)).get("rUSDC")?.raw).toBe(USDC(400));
+  });
+
+  it("writes no row when the chain refuses the hold", async () => {
+    state.vaultBalance.mockResolvedValue(USDC(100));
+    await expect(
+      reserve([
+        { user, token: "rUSDC", amount: "60", source: "event_order", sourceId: "eo-1" },
+        { user, token: "rUSDC", amount: "60", source: "event_order", sourceId: "eo-2" },
+      ]),
+    ).rejects.toThrow();
+    // All or nothing, so the first leg is not left holding on its own either.
+    expect(held.held()).toHaveLength(0);
+    expect(held.lockedOf(user, "rUSDC")).toBe(0n);
+  });
+
+  it("asks the chain to let go before marking a claim released", async () => {
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      { user, token: "rUSDC", amount: "400", source: "event_order", sourceId: "eo-1" },
+    ]);
+    expect(held.lockedOf(user, "rUSDC")).toBe(USDC(400));
+    await release("event_order", "eo-1");
+    expect(state.releaseCommitments).toHaveBeenCalled();
+    expect(held.lockedOf(user, "rUSDC")).toBe(0n);
+  });
+
+  it("asks the chain for nothing when the trade already consumed the hold", async () => {
+    // A spend ends the commitment inside the same swap that moved the tokens,
+    // so there is nothing left to release and no transaction to pay for.
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      { user, token: "rUSDC", amount: "400", source: "event_order", sourceId: "eo-1" },
+    ]);
+    await release("event_order", "eo-1", "spent");
+    expect(state.releaseCommitments).not.toHaveBeenCalled();
+  });
+
+  it("gives every rung of one plan a hold the chain can tell apart", async () => {
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      { user, token: "rUSDC", amount: "100", source: "playbook", sourceId: "pb-1", stepIndex: 0 },
+      { user, token: "rUSDC", amount: "60", source: "playbook", sourceId: "pb-1", stepIndex: 1 },
+    ]);
+    expect(held.locks.size).toBe(2);
+    await release("playbook", "pb-1", "spent", 0);
+    expect(held.lockedOf(user, "rUSDC")).toBe(USDC(60));
+  });
+
+  it("refuses to promise a share of a token with nothing free", async () => {
+    state.vaultBalance.mockResolvedValue(USDC(100));
+    await reserve([
+      { user, token: "rUSDC", amount: "100", source: "event_order", sourceId: "eo-1" },
+    ]);
+    await expect(
+      reserve([
+        {
+          user,
+          token: "rUSDC",
+          amount: "50",
+          amountIsPercent: true,
+          source: "event_order",
+          sourceId: "eo-2",
+        },
+      ]),
+    ).rejects.toThrow("no rUSDC free in your vault");
   });
 });

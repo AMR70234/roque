@@ -17,8 +17,13 @@
  * What the balance means is the subtle part. A vault balance is not the same as
  * spendable money once orders can rest for a fortnight: an armed event order has
  * already promised part of it. So the figure this gate compares against is the
- * balance minus everything `reservations.ts` is holding, which is what stops one
- * deposit from backing two orders that each believe they can spend it.
+ * balance minus what the executor is holding for commitments, which is what
+ * stops one deposit from backing two orders that each believe they can spend it.
+ *
+ * That subtraction used to be a sum over a table, and the table was advisory.
+ * It is `AgentExecutor.lockedBalance` now, which is the same number the contract
+ * will refuse a withdrawal or an unrelated trade against. So this gate and the
+ * on-chain refusal cannot drift apart: being short here means being short there.
  *
  * The arithmetic is pure and the chain read is one thin wrapper over it, so the
  * interesting part — which legs the vault is even on the hook for — is testable
@@ -134,6 +139,10 @@ function shortfall(
  * Fail closed on purpose. If the balance cannot be read we do not sign, because
  * "we could not check" is not "it is fine", and the cost of being wrong here is
  * an order that looks live and can never fill.
+ *
+ * It is also no longer the last word. Arming writes an on-chain hold, and the
+ * contract applies this same arithmetic before it will take one. This gate just
+ * gets there first, with a sentence instead of a revert.
  */
 export async function assertVaultFunds(
   user: `0x${string}`,
@@ -157,9 +166,8 @@ export async function assertVaultFunds(
   needs.forEach((need, i) => {
     const token = requireToken(need.symbol);
     // Money already promised to a resting order is not money this one can
-    // spend. Floored at zero because a direct on-chain withdrawal can leave
-    // claims standing against a balance that is gone, and a negative figure
-    // here would read as credit.
+    // spend. Floored at zero, matching availableBalance in the executor, which
+    // floors for the same reason: a negative figure would read as a credit.
     const hold = held.get(token.symbol)?.raw ?? 0n;
     const balance = balances[i];
     const free = balance > hold ? balance - hold : 0n;

@@ -4,48 +4,67 @@
  * `funding.ts` answers "can the vault pay for this?" by reading the chain. That
  * was the whole story while every trade was signed and settled in one breath,
  * and it stopped being the whole story the moment an order could rest for a
- * fortnight. An event order is a promise to spend days from now, and until this
- * module existed that promise was invisible: the money sat in the vault looking
+ * fortnight. An event order is a promise to spend days from now, and until that
+ * promise was written down it was invisible: the money sat in the vault looking
  * spendable, counted as available to the next order written against it, and
  * could be withdrawn in full while the order meant to spend it was still armed.
- * Both failures then landed at fill time, on a balance nobody had mentioned.
  *
- * So a commitment now writes a row, and the sum of a user's open rows is the
- * part of their vault that is spoken for. `available` is balance minus that
- * sum, and it is what the funding gate and the withdrawal check both read.
+ * This module used to be where that promise lived, as a row in a table, and the
+ * honest caveat printed at the top was that a row is not a lock. It shut the
+ * app's own withdraw button and nothing else. A person could spend the same
+ * balance on an ordinary autonomous trade and withdraw what it bought, since the
+ * ledger had never heard of the token on the other side. The hold was a note
+ * stuck to money anyone could walk past.
  *
- * Two honest limits, stated here because they are easy to forget once the UI
- * says "locked":
+ * So the executor owns the hold now. `AgentExecutor.lockedBalance` is the line
+ * between the free and committed halves of a vault, withdraw and every agent
+ * trade are measured against it, and nothing can route around it because the
+ * only function that can move the money is the one doing the checking.
  *
- * This is a ledger, not a lock. `AgentExecutor.withdraw` pays out the whole
- * balance to anyone who calls it directly, because the deployed contract has
- * never heard of this table. Closing that properly needs a `lockedBalance`
- * mapping and a redeploy, which the project's constraints rule out. What this
- * closes is the hole in the app, which is where the money actually leaves from.
+ * What is left here is the story, not the custody. A row records which order
+ * promised what, which rung of which plan, and whether the figure came from a
+ * percentage somebody typed, so the vault panel can say "committed to 2 live
+ * orders" instead of an unexplained number. The figures themselves are read off
+ * the chain. When the two disagree the chain is right, by construction.
  *
- * A percentage order is the awkward case. Its size is decided at fire time
- * against whatever the balance is then, so there is no figure it has committed
- * to in advance. The first cut of this recorded the share and held nothing,
- * which turned out to be useless in exactly the case people reach for first:
- * "spend all of my rUSDC when X happens" held nothing at all, and the vault
- * showed the whole balance as free right up until the order tried to fill.
- *
- * So a share is resolved against the balance at the moment it is promised and
- * that figure is held, with the percentage kept alongside it so the UI can say
- * where the number came from. The fill still recomputes its own size at fire
- * time, so nothing about what actually trades has changed. What the hold is
- * really promising is "this much will still be here", which is the useful
- * guarantee even when the final size is decided later.
+ * The percentage case is still the awkward one. Its size is decided at fire
+ * time against whatever the balance is then, so there is no figure it has
+ * committed to in advance. Holding nothing turned out to be useless in exactly
+ * the case people reach for first: "spend all of my rUSDC when X happens" held
+ * nothing at all, and the vault showed the whole balance as free right up until
+ * the order tried to fill. So a share is resolved against what is free at the
+ * moment it is promised and that figure is locked, with the percentage kept
+ * beside it so the UI can say where the number came from. The fill still sizes
+ * itself at fire time. What the hold promises is "this much will still be here",
+ * which is the useful guarantee even when the final size is decided later.
  */
 
 import { randomUUID } from "node:crypto";
-import { formatUnits, parseUnits } from "viem";
-import { tokenBySymbol, type TokenMeta } from "@roque/shared";
+import { formatUnits, keccak256, parseUnits, stringToHex } from "viem";
+import { tokenBySymbol, tokenList, type TokenMeta } from "@roque/shared";
 import { q } from "./db/index.js";
-import { vaultBalance } from "./intents.js";
+import {
+  freshNonce,
+  lockCommitments,
+  lockedBalance,
+  releaseCommitments,
+  vaultBalance,
+  type CommitIntent,
+} from "./intents.js";
 
 /** What promised the money. Releasing is keyed to this, not to a row id. */
 export type ReservationSource = "event_order" | "playbook";
+
+/**
+ * Default life of a hold when a caller names no end. Every commitment carries
+ * one: the contract refuses an unbounded hold, so that a lost agent key cannot
+ * tie up somebody's vault forever. Thirty days comfortably outlasts the
+ * fourteen-day default an event order gets.
+ */
+const DEFAULT_HOLD_DAYS = 30;
+
+/** The contract's own ceiling, with a day of room so rounding cannot cross it. */
+const MAX_HOLD_DAYS = 119;
 
 export interface ReservationInput {
   user: string;
@@ -58,13 +77,15 @@ export interface ReservationInput {
   sourceId: string;
   /** Which rung of a playbook. Zero for an event order, which has one leg. */
   stepIndex?: number;
+  /** When the hold should lapse on its own. Defaults to thirty days out. */
+  holdUntil?: Date;
 }
 
 export interface TokenHold {
   symbol: string;
-  /** Absolute units held across every open claim on this token. */
+  /** Absolute units the executor is holding, straight off the chain. */
   raw: bigint;
-  /** Percent shares claimed but not reservable as a figure. */
+  /** Percent shares behind the hold, for explaining where a figure came from. */
   percents: number[];
   /** How many open claims make up this hold. */
   claims: number;
@@ -83,12 +104,55 @@ function requireToken(symbol: string): TokenMeta {
 }
 
 /**
- * Record a claim. Idempotent on `(source, sourceId, stepIndex)`, so arming a
- * playbook twice or a keeper running twice over one order cannot double-count
- * the same promise — the second write updates the first rather than adding to
- * it. Callers pass every leg at once so one commitment is one round trip.
+ * The commitment id for one promise, derived rather than stored.
+ *
+ * Deriving it from what made the promise is what buys idempotence for free:
+ * arming the same order twice, or a keeper running twice over the same rung,
+ * names the same commitment both times, and the contract resizes that one hold
+ * instead of stacking a second claim on the same money. There is no id to keep
+ * in step with anything, and no way for a row and a lock to drift apart.
+ */
+export function commitmentIdFor(
+  source: ReservationSource,
+  sourceId: string,
+  stepIndex = 0,
+): `0x${string}` {
+  return keccak256(stringToHex(`roque:${source}:${sourceId}:${stepIndex}`));
+}
+
+function holdDeadline(holdUntil?: Date): bigint {
+  const now = Date.now();
+  const floor = now + 60 * 60 * 1000;
+  const ceiling = now + MAX_HOLD_DAYS * 24 * 60 * 60 * 1000;
+  const wanted = holdUntil ? holdUntil.getTime() : now + DEFAULT_HOLD_DAYS * 24 * 60 * 60 * 1000;
+  const clamped = Math.min(Math.max(wanted, floor), ceiling);
+  return BigInt(Math.floor(clamped / 1000));
+}
+
+/**
+ * Promise the money, on-chain, and record what promised it.
+ *
+ * The lock goes first and this does not return until the chain has confirmed
+ * it, because an order called armed while its hold is still in the mempool is
+ * the original bug with extra steps: the funding gate would read a lock that is
+ * not there and let the next order promise the same balance. A refusal from the
+ * contract propagates as a thrown error, which is what turns "your vault cannot
+ * cover this" into a sentence at the moment somebody presses the button rather
+ * than a fill that quietly never happens.
+ *
+ * The rows are written after, and only after. A row with no lock behind it would
+ * overstate what is committed; the figures are read from the chain anyway, so
+ * the worst a missing row costs is a less specific sentence in the UI.
  */
 export async function reserve(legs: ReservationInput[]): Promise<void> {
+  if (legs.length === 0) return;
+
+  const prepared: Array<{ leg: ReservationInput; token: TokenMeta; raw: bigint; percent: number | null; id: `0x${string}` }> = [];
+  // Running total of what this call has already claimed, so a plan with two
+  // rungs on the same token sizes its second share against what the first one
+  // left rather than against the same free balance twice.
+  const claimedHere = new Map<string, bigint>();
+
   for (const leg of legs) {
     const token = requireToken(leg.token);
     const percent = leg.amountIsPercent ? Number(leg.amount) : null;
@@ -96,31 +160,66 @@ export async function reserve(legs: ReservationInput[]): Promise<void> {
     if (percent === null) {
       raw = parseUnits(leg.amount, token.decimals);
     } else {
-      // Resolve the share now, against what is free rather than the whole
-      // balance, so two "half of my rUSDC" orders promise half and then a
-      // quarter instead of both promising half of the same money.
       const free = (await availability(leg.user, token.symbol)).available;
-      raw = (free * BigInt(Math.round(percent * 100))) / 10_000n;
+      const alreadyHere = claimedHere.get(token.symbol) ?? 0n;
+      const spare = free > alreadyHere ? free - alreadyHere : 0n;
+      raw = (spare * BigInt(Math.round(percent * 100))) / 10_000n;
     }
+    if (raw <= 0n) {
+      throw new Error(
+        `There is no ${token.symbol} free in your vault to promise to this order.`,
+      );
+    }
+    claimedHere.set(token.symbol, (claimedHere.get(token.symbol) ?? 0n) + raw);
+    prepared.push({
+      leg,
+      token,
+      raw,
+      percent,
+      id: commitmentIdFor(leg.source, leg.sourceId, leg.stepIndex ?? 0),
+    });
+  }
+
+  const user = legs[0].user.toLowerCase() as `0x${string}`;
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  const intents: CommitIntent[] = [];
+  for (const item of prepared) {
+    intents.push({
+      user: item.leg.user.toLowerCase() as `0x${string}`,
+      token: item.token.address,
+      amount: item.raw,
+      unlockAt: holdDeadline(item.leg.holdUntil),
+      commitmentId: item.id,
+      nonce: await freshNonce(user),
+      deadline,
+    });
+  }
+
+  await lockCommitments(intents);
+
+  for (const item of prepared) {
     await q(
       `INSERT INTO vault_reservations
-         (id, user_address, token, amount_raw, percent, source_kind, source_id, step_index, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'held')
+         (id, user_address, token, amount_raw, percent, source_kind, source_id, step_index,
+          commitment_id, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'held')
        ON CONFLICT (source_kind, source_id, step_index) DO UPDATE
-         SET amount_raw = EXCLUDED.amount_raw,
-             percent    = EXCLUDED.percent,
-             token      = EXCLUDED.token,
-             status     = 'held',
-             released_at = NULL`,
+         SET amount_raw    = EXCLUDED.amount_raw,
+             percent       = EXCLUDED.percent,
+             token         = EXCLUDED.token,
+             commitment_id = EXCLUDED.commitment_id,
+             status        = 'held',
+             released_at   = NULL`,
       [
         randomUUID(),
-        leg.user.toLowerCase(),
-        token.symbol,
-        raw.toString(),
-        percent,
-        leg.source,
-        leg.sourceId,
-        leg.stepIndex ?? 0,
+        item.leg.user.toLowerCase(),
+        item.token.symbol,
+        item.raw.toString(),
+        item.percent,
+        item.leg.source,
+        item.leg.sourceId,
+        item.leg.stepIndex ?? 0,
+        item.id,
       ],
     );
   }
@@ -128,9 +227,16 @@ export async function reserve(legs: ReservationInput[]): Promise<void> {
 
 /**
  * Let a claim go. `spent` when the trade actually happened and `released` when
- * it never will; both stop counting against the balance, and the distinction is
+ * it never will. Both stop counting against the balance, and the distinction is
  * kept because "this money was used" and "this order was called off" are
- * different facts and somebody will want to tell them apart later.
+ * different facts somebody will want to tell apart later.
+ *
+ * It is also the difference between sending a transaction and not. A spend
+ * consumed the commitment inside the same swap that moved the tokens, so the
+ * chain has already let go and there is nothing to ask it for. A release has to
+ * be asked for, and is asked for before the rows are marked, so a failure
+ * leaves the claim standing rather than claiming a hold is gone while the chain
+ * still holds it.
  *
  * With no `stepIndex` this releases every rung of the source, which is what
  * cancelling a playbook means. With one, it releases that rung alone, which is
@@ -142,6 +248,23 @@ export async function release(
   outcome: "spent" | "released" = "released",
   stepIndex?: number,
 ): Promise<void> {
+  const rows = await q<{ user_address: string; step_index: number }>(
+    stepIndex === undefined
+      ? `SELECT user_address, step_index FROM vault_reservations
+           WHERE source_kind=$1 AND source_id=$2 AND status='held'`
+      : `SELECT user_address, step_index FROM vault_reservations
+           WHERE source_kind=$1 AND source_id=$2 AND step_index=$3 AND status='held'`,
+    stepIndex === undefined ? [source, sourceId] : [source, sourceId, stepIndex],
+  );
+
+  if (outcome === "released" && rows.length > 0) {
+    const user = rows[0].user_address.toLowerCase() as `0x${string}`;
+    await releaseCommitments(
+      user,
+      rows.map((r) => commitmentIdFor(source, sourceId, r.step_index)),
+    );
+  }
+
   if (stepIndex === undefined) {
     await q(
       `UPDATE vault_reservations SET status=$3, released_at=now()
@@ -157,35 +280,36 @@ export async function release(
   );
 }
 
-/** Every open claim a user has, grouped by token. */
+/**
+ * Every open claim a user has, grouped by token.
+ *
+ * The figure is the chain's: `lockedBalance` is what the executor will actually
+ * refuse to move. The rows only supply the explanation, so a stale or missing
+ * row makes the sentence vaguer and never makes the number wrong.
+ */
 export async function heldByToken(user: string): Promise<Map<string, TokenHold>> {
-  const rows = await q<ReservationRow>(
-    `SELECT token, amount_raw, percent FROM vault_reservations
-      WHERE LOWER(user_address)=LOWER($1) AND status='held'`,
-    [user],
-  );
+  const owner = user.toLowerCase() as `0x${string}`;
+  const [locks, rows] = await Promise.all([
+    Promise.all(tokenList.map(async (t) => [t.symbol, await lockedBalance(owner, t.address)] as const)),
+    q<ReservationRow>(
+      `SELECT token, amount_raw, percent FROM vault_reservations
+        WHERE LOWER(user_address)=LOWER($1) AND status='held'`,
+      [user],
+    ),
+  ]);
+
   const held = new Map<string, TokenHold>();
+  for (const [symbol, raw] of locks) {
+    if (raw > 0n) held.set(symbol, { symbol, raw, percents: [], claims: 0 });
+  }
   for (const row of rows) {
-    let entry = held.get(row.token);
-    if (!entry) {
-      entry = { symbol: row.token, raw: 0n, percents: [], claims: 0 };
-      held.set(row.token, entry);
-    }
+    const entry = held.get(row.token);
+    // A row with no lock behind it is a claim the chain has already let go, or
+    // one whose lock never landed. Either way the chain is the one to believe,
+    // so it is not counted and not explained.
+    if (!entry) continue;
     entry.claims += 1;
-    // A share carries both: the figure it resolved to when it was promised, and
-    // the percentage it came from. The figure counts towards the hold like any
-    // other -- it used to be skipped, which meant a percentage order held
-    // nothing at all -- and the percentage is kept only so the UI can say where
-    // the number came from.
     if (row.percent !== null) entry.percents.push(Number(row.percent));
-    // A malformed row must not take down a balance read, and treating it as
-    // zero is the safe direction: it under-reports the hold rather than
-    // silently blocking a withdrawal the user is entitled to make.
-    try {
-      entry.raw += BigInt(row.amount_raw);
-    } catch {
-      /* keep going */
-    }
   }
   return held;
 }
@@ -194,7 +318,7 @@ export interface TokenAvailability {
   symbol: string;
   /** What the chain says is in the vault. */
   balance: bigint;
-  /** What open claims have spoken for. */
+  /** What the chain is holding for commitments. */
   held: bigint;
   /** Balance minus held, floored at zero. */
   available: bigint;
@@ -204,12 +328,9 @@ export interface TokenAvailability {
 }
 
 /**
- * What of one token is actually free to spend or withdraw.
- *
- * Floored at zero because held can exceed balance: somebody can withdraw
- * directly on-chain, behind this ledger's back, and leave claims standing
- * against money that is gone. A negative available would read as a credit,
- * which is the one thing it must never do.
+ * What of one token is actually free to spend or withdraw. Both figures come
+ * from the executor, so this agrees with what a withdrawal will do rather than
+ * predicting it.
  */
 export async function availability(
   user: string,
@@ -217,27 +338,33 @@ export async function availability(
 ): Promise<TokenAvailability> {
   const token = requireToken(symbol);
   const owner = user.toLowerCase() as `0x${string}`;
-  const [balance, held] = await Promise.all([
+  const [balance, locked, rows] = await Promise.all([
     vaultBalance(owner, token.address),
-    heldByToken(owner),
+    lockedBalance(owner, token.address),
+    q<ReservationRow>(
+      `SELECT token, amount_raw, percent FROM vault_reservations
+        WHERE LOWER(user_address)=LOWER($1) AND status='held' AND token=$2`,
+      [user, token.symbol],
+    ),
   ]);
-  const hold = held.get(token.symbol);
-  const heldRaw = hold?.raw ?? 0n;
   return {
     symbol: token.symbol,
     balance,
-    held: heldRaw,
-    available: balance > heldRaw ? balance - heldRaw : 0n,
-    percents: hold?.percents ?? [],
-    claims: hold?.claims ?? 0,
+    held: locked,
+    available: balance > locked ? balance - locked : 0n,
+    percents: rows.filter((r) => r.percent !== null).map((r) => Number(r.percent)),
+    claims: locked > 0n ? rows.length : 0,
   };
 }
 
 /**
- * Refuse a withdrawal that would dip into committed money.
+ * Refuse a withdrawal that would dip into committed money, before the wallet
+ * prompt rather than after it.
  *
- * The sentence names the shortfall in the token's own units, because "you have
- * 400 committed" is only useful next to "so you can take out 600".
+ * The contract refuses this too, and the contract is the one that matters. What
+ * this adds is a sentence: "400 is committed to 2 live orders, so 600 of your
+ * 1,000 is free" reads better than a reverted transaction, and it arrives
+ * before somebody has approved anything.
  */
 export async function assertWithdrawable(
   user: string,
@@ -248,7 +375,10 @@ export async function assertWithdrawable(
   const state = await availability(user, symbol);
   if (amountRaw <= state.available) return;
   const human = (v: bigint) => formatUnits(v, token.decimals);
-  const claims = `${state.claims} live order${state.claims === 1 ? "" : "s"}`;
+  const claims =
+    state.claims > 0
+      ? `${state.claims} live order${state.claims === 1 ? "" : "s"}`
+      : "orders that have not fired yet";
   throw new Error(
     `${human(state.held)} ${token.symbol} is committed to ${claims}, so ${human(state.available)} of your ${human(state.balance)} is free to withdraw. Cancel an order to free the rest.`,
   );

@@ -31,8 +31,11 @@ import {
   freshNonce,
   agentSignerAddress,
   getCapability,
+  getCommitment,
+  lockedBalance,
   vaultBalance,
   remainingDailyUsd,
+  NO_COMMITMENT,
   type SwapIntent,
   type LimitIntent,
 } from "./intents.js";
@@ -85,8 +88,14 @@ async function resolveAmount(
   // the vault; in copilot mode the frontend supplies the wallet balance, so a
   // bare percent without a base is asked to be made concrete there instead.
   if (mode === "autonomous" && user) {
-    const raw = await vaultBalance(user, tokenIn.address);
-    const base = Number(formatUnits(raw, tokenIn.decimals));
+    // Free money only. "All of my rUSDC" from the chat cannot mean the part an
+    // armed event order is standing on, because the executor would refuse it.
+    const [raw, locked] = await Promise.all([
+      vaultBalance(user, tokenIn.address),
+      lockedBalance(user, tokenIn.address),
+    ]);
+    const free = raw > locked ? raw - locked : 0n;
+    const base = Number(formatUnits(free, tokenIn.decimals));
     const amount = (base * percent) / 100;
     return amount.toString();
   }
@@ -123,6 +132,8 @@ export interface VaultSwapPlan {
   minOut: bigint;
   usdValue: bigint;
   slippageBps: number;
+  /** The commitment this trade fulfils, or NO_COMMITMENT for a plain trade. */
+  commitmentId: `0x${string}`;
 }
 
 /**
@@ -144,8 +155,11 @@ export async function preflightVaultSwap(params: {
   amount: string;
   amountIsPercent?: boolean;
   slippageBps: number;
+  /** Set when this trade is the fulfilment of a commitment it may spend. */
+  commitmentId?: `0x${string}`;
 }): Promise<VaultSwapPlan> {
   const { user, tokenIn, tokenOut } = params;
+  const commitmentId = params.commitmentId ?? NO_COMMITMENT;
 
   if (tokenIn.address.toLowerCase() === tokenOut.address.toLowerCase()) {
     throw new Error("A trade needs two different tokens.");
@@ -164,8 +178,31 @@ export async function preflightVaultSwap(params: {
     throw new Error("Your agent capability has expired.");
   }
 
-  // One balance read serves both the percentage base and the sufficiency check.
-  const bal = await vaultBalance(user, tokenIn.address);
+  // What this particular trade may spend, which is not the same as the balance.
+  // Part of a vault can be committed to orders that have not fired, and the
+  // executor will refuse to move that part for anything else. A trade standing
+  // on its own gets the free half. A trade fulfilling a commitment gets the free
+  // half plus its own hold, which is exactly the rule the contract applies, so
+  // the sentence here and the on-chain refusal cannot disagree.
+  const [bal, locked] = await Promise.all([
+    vaultBalance(user, tokenIn.address),
+    lockedBalance(user, tokenIn.address),
+  ]);
+  let ownHold = 0n;
+  if (commitmentId !== NO_COMMITMENT) {
+    const commitment = await getCommitment(commitmentId);
+    if (
+      !commitment.active ||
+      commitment.user.toLowerCase() !== user.toLowerCase() ||
+      commitment.token.toLowerCase() !== tokenIn.address.toLowerCase()
+    ) {
+      throw new Error("The hold behind this order is gone, so it cannot spend it.");
+    }
+    ownHold = commitment.amount;
+  }
+  const free = bal > locked ? bal - locked : 0n;
+  const spendable = free + ownHold;
+
   let amount = params.amount;
   if (params.amountIsPercent) {
     const percent = Number(params.amount);
@@ -173,16 +210,21 @@ export async function preflightVaultSwap(params: {
       throw new Error("A percentage amount has to be between 0 and 100.");
     }
     amount = humanAmount(
-      (Number(formatUnits(bal, tokenIn.decimals)) * percent) / 100,
+      (Number(formatUnits(spendable, tokenIn.decimals)) * percent) / 100,
       tokenIn.decimals,
     );
   }
 
   const amountInRaw = parseUnits(amount, tokenIn.decimals);
   if (amountInRaw <= 0n) throw new Error("That amount is too small to trade.");
-  if (bal < amountInRaw) {
+  if (spendable < amountInRaw) {
+    const committed = locked - ownHold;
+    const because =
+      committed > 0n
+        ? ` ${formatUnits(committed, tokenIn.decimals)} of it is committed to orders that have not fired yet.`
+        : "";
     throw new Error(
-      `Your vault holds ${formatUnits(bal, tokenIn.decimals)} ${tokenIn.symbol}, which is short of this trade.`,
+      `Your vault has ${formatUnits(spendable, tokenIn.decimals)} ${tokenIn.symbol} free, which is short of this trade.${because}`,
     );
   }
 
@@ -205,7 +247,7 @@ export async function preflightVaultSwap(params: {
   const quoted = await quoteSwap(tokenIn.symbol, tokenOut.symbol, amount);
   const minOut = minOutForSlippage(quoted.amountOutRaw, slippageBps);
 
-  return { tokenIn, tokenOut, amount, amountInRaw, minOut, usdValue, slippageBps };
+  return { tokenIn, tokenOut, amount, amountInRaw, minOut, usdValue, slippageBps, commitmentId };
 }
 
 /**
@@ -223,6 +265,9 @@ export async function executeVaultSwap(
     tokenOut: plan.tokenOut.address,
     amountIn: plan.amountInRaw,
     minAmountOut: plan.minOut,
+    // Naming the commitment is what lets this trade reach the money the order
+    // set aside, and what ends the hold in the same transaction that spends it.
+    commitmentId: plan.commitmentId,
     nonce: await freshNonce(user),
     deadline: BigInt(Math.floor(Date.now() / 1000) + INTENT_TTL_SECONDS),
   };
@@ -447,6 +492,11 @@ export async function executeAutonomous(params: {
       triggerPrice: toTriggerPrice(price),
       triggerAbove: interp.triggerAbove,
       expiry: BigInt(now + LIMIT_EXPIRY_SECONDS),
+      // A trade the person asked for now stands on its own, so it may only
+      // reach free vault money. This is the hole the on-chain hold closes:
+      // spending committed rUSDC here and withdrawing the rWETH it bought used
+      // to be the way around a lock that only knew about rUSDC.
+      commitmentId: NO_COMMITMENT,
       nonce,
       deadline: BigInt(now + INTENT_TTL_SECONDS),
     };
@@ -462,6 +512,7 @@ export async function executeAutonomous(params: {
     tokenOut: tokenOut.address,
     amountIn: amountInRaw,
     minAmountOut: minOut,
+    commitmentId: NO_COMMITMENT,
     nonce,
     deadline: BigInt(now + INTENT_TTL_SECONDS),
   };

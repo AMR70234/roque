@@ -13,11 +13,16 @@
  * That is the deal: the agent gets to be fast, the user keeps the hard limits.
  */
 
+import { randomInt } from "node:crypto";
 import { encodeFunctionData, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { addresses, abis, eip712Domain, eip712Types } from "@roque/shared";
 import { agentSignerKey } from "./env.js";
-import { publicClient, relayerWallet } from "./chain.js";
+import { confirmTx, publicClient, sendRelayerTx } from "./chain.js";
+
+/** No commitment: an ordinary trade, which may only reach free vault money. */
+export const NO_COMMITMENT =
+  "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
 export interface SwapIntent {
   user: `0x${string}`;
@@ -25,6 +30,8 @@ export interface SwapIntent {
   tokenOut: `0x${string}`;
   amountIn: bigint;
   minAmountOut: bigint;
+  /** The commitment this trade fulfils, or NO_COMMITMENT for a plain trade. */
+  commitmentId: `0x${string}`;
   nonce: bigint;
   deadline: bigint;
 }
@@ -38,9 +45,42 @@ export interface LimitIntent {
   triggerPrice: bigint;
   triggerAbove: boolean;
   expiry: bigint;
+  commitmentId: `0x${string}`;
   nonce: bigint;
   deadline: bigint;
 }
+
+/** Setting vault money aside. Moves nothing; narrows what the vault may do. */
+export interface CommitIntent {
+  user: `0x${string}`;
+  token: `0x${string}`;
+  amount: bigint;
+  unlockAt: bigint;
+  commitmentId: `0x${string}`;
+  nonce: bigint;
+  deadline: bigint;
+}
+
+/** Handing it back. The epoch pins this to one particular lock of that id. */
+export interface ReleaseIntent {
+  user: `0x${string}`;
+  commitmentId: `0x${string}`;
+  epoch: number;
+  deadline: bigint;
+}
+
+/** One commitment as the executor holds it. */
+export interface Commitment {
+  user: `0x${string}`;
+  token: `0x${string}`;
+  amount: bigint;
+  unlockAt: bigint;
+  epoch: number;
+  active: boolean;
+}
+
+/** How long a signed intent stays valid. Short: the relayer submits at once. */
+const INTENT_TTL_SECONDS = 300;
 
 function agentAccount() {
   return privateKeyToAccount(agentSignerKey());
@@ -53,12 +93,19 @@ export function agentSignerAddress(): `0x${string}` {
 
 /**
  * A nonce no one has spent for this user yet. Nonces are per user and the
- * executor simply marks each one used, so we pick a value keyed to the current
- * time and confirm it is free. Practically this never collides; if it somehow
- * did, the on-chain check would reject the second use rather than double spend.
+ * executor simply marks each one used, so we pick a value and confirm it is
+ * free.
+ *
+ * The value used to be the millisecond clock alone, which collides more often
+ * than it sounds: two workers reaching this in the same millisecond both read
+ * the nonce as unused, because neither transaction has landed yet, and the
+ * second one reverts on arrival. Not a double spend -- the contract is the one
+ * saying no -- but a fill that failed for a reason nobody can read. A random
+ * tail under the clock makes a same-millisecond collision a one-in-a-million
+ * event rather than a certainty, and the loop below still checks.
  */
 export async function freshNonce(user: `0x${string}`): Promise<bigint> {
-  let candidate = BigInt(Date.now());
+  let candidate = BigInt(Date.now()) * 1_000_000n + BigInt(randomInt(1_000_000));
   for (let i = 0; i < 8; i++) {
     const used = (await publicClient().readContract({
       address: addresses.agentExecutor,
@@ -92,6 +139,26 @@ export async function signLimitIntent(intent: LimitIntent): Promise<Hex> {
   });
 }
 
+/** Sign a commitment as the agent. */
+export async function signCommitIntent(intent: CommitIntent): Promise<Hex> {
+  return agentAccount().signTypedData({
+    domain: eip712Domain,
+    types: { CommitIntent: eip712Types.CommitIntent },
+    primaryType: "CommitIntent",
+    message: intent,
+  });
+}
+
+/** Sign a release as the agent. */
+export async function signReleaseIntent(intent: ReleaseIntent): Promise<Hex> {
+  return agentAccount().signTypedData({
+    domain: eip712Domain,
+    types: { ReleaseIntent: eip712Types.ReleaseIntent },
+    primaryType: "ReleaseIntent",
+    message: intent,
+  });
+}
+
 /**
  * Submit a signed swap to Sepolia and return the transaction hash. We encode and
  * send with the relayer wallet, which pays the gas; the intent still moves only
@@ -117,13 +184,113 @@ export async function submitLimitOrder(intent: LimitIntent, signature: Hex): Pro
 }
 
 async function sendFromRelayer(data: Hex): Promise<Hex> {
-  const wallet = relayerWallet();
-  return wallet.sendTransaction({
-    account: wallet.account!,
-    chain: wallet.chain,
-    to: addresses.agentExecutor,
-    data,
-  });
+  return sendRelayerTx({ to: addresses.agentExecutor, data });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Commitments: holding vault money for a trade that has not happened yet
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Set money aside, and wait for it to actually be set aside.
+ *
+ * The waiting is the point. A caller asks for this while turning a screened
+ * order into an armed one, and an armed order with an unconfirmed hold behind it
+ * is the old bug wearing a new hat: the funding gate would read a lock that is
+ * not there yet and let the next order promise the same money. So this returns
+ * only once the chain agrees, and throws if the chain refused, which is how a
+ * vault that cannot cover the commitment turns into a sentence the person reads
+ * rather than an order that quietly cannot fill.
+ *
+ * Every leg goes in one transaction, all or nothing, so a playbook is never
+ * half funded.
+ */
+export async function lockCommitments(intents: CommitIntent[]): Promise<Hex | null> {
+  if (intents.length === 0) return null;
+  const signatures = await Promise.all(intents.map(signCommitIntent));
+  const data =
+    intents.length === 1
+      ? encodeFunctionData({
+          abi: abis.agentExecutor,
+          functionName: "lockForCommitment",
+          args: [intents[0], signatures[0]],
+        })
+      : encodeFunctionData({
+          abi: abis.agentExecutor,
+          functionName: "lockForCommitments",
+          args: [intents, signatures],
+        });
+  const hash = await sendFromRelayer(data);
+  await confirmTx(hash, "Holding the vault money for this order");
+  return hash;
+}
+
+/**
+ * Hand commitments back. Skips the ones the chain has already let go, which is
+ * most of them most of the time: a release sweep runs on every exit an order
+ * has, and several of those paths overlap. Returns null when there was nothing
+ * left to release, so a caller can tell "done" from "nothing to do".
+ */
+export async function releaseCommitments(
+  user: `0x${string}`,
+  commitmentIds: `0x${string}`[],
+): Promise<Hex | null> {
+  if (commitmentIds.length === 0) return null;
+  const live = await Promise.all(
+    commitmentIds.map(async (id) => {
+      const c = await getCommitment(id);
+      return c.active ? { id, epoch: c.epoch } : null;
+    }),
+  );
+  const open = live.filter((c): c is { id: `0x${string}`; epoch: number } => c !== null);
+  if (open.length === 0) return null;
+
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + INTENT_TTL_SECONDS);
+  const intents: ReleaseIntent[] = open.map((c) => ({
+    user,
+    commitmentId: c.id,
+    epoch: c.epoch,
+    deadline,
+  }));
+  const signatures = await Promise.all(intents.map(signReleaseIntent));
+  const data =
+    intents.length === 1
+      ? encodeFunctionData({
+          abi: abis.agentExecutor,
+          functionName: "releaseCommitment",
+          args: [intents[0], signatures[0]],
+        })
+      : encodeFunctionData({
+          abi: abis.agentExecutor,
+          functionName: "releaseCommitments",
+          args: [intents, signatures],
+        });
+  const hash = await sendFromRelayer(data);
+  await confirmTx(hash, "Releasing the hold on this order");
+  return hash;
+}
+
+/** One commitment as the executor currently holds it. */
+export async function getCommitment(commitmentId: `0x${string}`): Promise<Commitment> {
+  return (await publicClient().readContract({
+    address: addresses.agentExecutor,
+    abi: abis.agentExecutor,
+    functionName: "getCommitment",
+    args: [commitmentId],
+  })) as Commitment;
+}
+
+/** How much of a token the executor is holding for this user's commitments. */
+export async function lockedBalance(
+  user: `0x${string}`,
+  token: `0x${string}`,
+): Promise<bigint> {
+  return (await publicClient().readContract({
+    address: addresses.agentExecutor,
+    abi: abis.agentExecutor,
+    functionName: "lockedBalance",
+    args: [user, token],
+  })) as bigint;
 }
 
 // ─────────────────────────────────────────────────────────────

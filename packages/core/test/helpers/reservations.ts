@@ -222,7 +222,7 @@ export function reservationStore(): ReservationStore {
           return "0xlock";
         },
       );
-      mocks.releaseCommitments?.mockImplementation(async (_user: string, ids: string[]) => {
+      mocks.releaseCommitments?.mockImplementation(async (ids: string[]) => {
         let touched = false;
         for (const id of ids) {
           const lock = locks.get(id);

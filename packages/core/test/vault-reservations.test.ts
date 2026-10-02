@@ -425,3 +425,39 @@ describe("the hold is the chain's, not the table's", () => {
     ).rejects.toThrow("no rUSDC free in your vault");
   });
 });
+
+describe("letting go without the table's help", () => {
+  it("frees a hold whose row never got written", async () => {
+    // The gap this closes: the lock lands on-chain and the write recording it
+    // does not. The row is the explanation, so losing it should cost a
+    // sentence in the UI, never the money itself.
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      { user, token: "rUSDC", amount: "400", source: "event_order", sourceId: "eo-1" },
+    ]);
+    held.rows.length = 0; // the row is gone; the lock is not
+    expect(held.lockedOf(user, "rUSDC")).toBe(USDC(400));
+
+    await release("event_order", "eo-1");
+    expect(held.lockedOf(user, "rUSDC")).toBe(0n);
+  });
+
+  it("frees every rung of a plan whose rows are gone", async () => {
+    state.vaultBalance.mockResolvedValue(USDC(1000));
+    await reserve([
+      { user, token: "rUSDC", amount: "100", source: "playbook", sourceId: "pb-1", stepIndex: 0 },
+      { user, token: "rUSDC", amount: "60", source: "playbook", sourceId: "pb-1", stepIndex: 2 },
+    ]);
+    held.rows.length = 0;
+
+    await release("playbook", "pb-1");
+    expect(held.lockedOf(user, "rUSDC")).toBe(0n);
+  });
+
+  it("asks for nothing when the source never held anything", async () => {
+    await release("event_order", "never-armed");
+    expect(state.releaseCommitments).toHaveBeenCalledTimes(1);
+    // Every candidate id reads as inactive, so no transaction is sent.
+    await expect(state.releaseCommitments.mock.results[0].value).resolves.toBeNull();
+  });
+});

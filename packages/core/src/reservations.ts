@@ -66,6 +66,15 @@ const DEFAULT_HOLD_DAYS = 30;
 /** The contract's own ceiling, with a day of room so rounding cannot cross it. */
 const MAX_HOLD_DAYS = 119;
 
+/**
+ * The most rungs a playbook can have, which bounds how many commitment ids one
+ * source can own. Kept as a local number rather than imported from playbooks.ts
+ * because that module imports this one, and a cycle to share a 10 is a poor
+ * trade. Over-counting is harmless: an id that was never locked reads as
+ * inactive and is skipped.
+ */
+const MAX_SOURCE_STEPS = 10;
+
 export interface ReservationInput {
   user: string;
   token: string;
@@ -248,21 +257,20 @@ export async function release(
   outcome: "spent" | "released" = "released",
   stepIndex?: number,
 ): Promise<void> {
-  const rows = await q<{ user_address: string; step_index: number }>(
-    stepIndex === undefined
-      ? `SELECT user_address, step_index FROM vault_reservations
-           WHERE source_kind=$1 AND source_id=$2 AND status='held'`
-      : `SELECT user_address, step_index FROM vault_reservations
-           WHERE source_kind=$1 AND source_id=$2 AND step_index=$3 AND status='held'`,
-    stepIndex === undefined ? [source, sourceId] : [source, sourceId, stepIndex],
-  );
-
-  if (outcome === "released" && rows.length > 0) {
-    const user = rows[0].user_address.toLowerCase() as `0x${string}`;
-    await releaseCommitments(
-      user,
-      rows.map((r) => commitmentIdFor(source, sourceId, r.step_index)),
-    );
+  if (outcome === "released") {
+    // Derived, not looked up. Reading the rows first would make releasing
+    // depend on a row having survived, and the one case where that fails is
+    // the one that matters: a lock that landed on-chain while the write
+    // recording it did not. The ids are a pure function of the source, the
+    // owner comes off the commitment, and an id that was never locked reads as
+    // inactive and is skipped. So this frees the money whatever the table says.
+    const steps =
+      stepIndex !== undefined
+        ? [stepIndex]
+        : source === "event_order"
+          ? [0]
+          : Array.from({ length: MAX_SOURCE_STEPS }, (_, i) => i);
+    await releaseCommitments(steps.map((i) => commitmentIdFor(source, sourceId, i)));
   }
 
   if (stepIndex === undefined) {

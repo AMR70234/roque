@@ -232,22 +232,26 @@ export async function lockCommitments(intents: CommitIntent[]): Promise<Hex | nu
  * left to release, so a caller can tell "done" from "nothing to do".
  */
 export async function releaseCommitments(
-  user: `0x${string}`,
   commitmentIds: `0x${string}`[],
 ): Promise<Hex | null> {
   if (commitmentIds.length === 0) return null;
+  // The owner comes off the commitment rather than from the caller. It is the
+  // chain's answer either way, and taking it from here means a release does not
+  // need a database row to have survived in order to work.
   const live = await Promise.all(
     commitmentIds.map(async (id) => {
       const c = await getCommitment(id);
-      return c.active ? { id, epoch: c.epoch } : null;
+      return c.active ? { id, epoch: c.epoch, user: c.user } : null;
     }),
   );
-  const open = live.filter((c): c is { id: `0x${string}`; epoch: number } => c !== null);
+  const open = live.filter(
+    (c): c is { id: `0x${string}`; epoch: number; user: `0x${string}` } => c !== null,
+  );
   if (open.length === 0) return null;
 
   const deadline = BigInt(Math.floor(Date.now() / 1000) + INTENT_TTL_SECONDS);
   const intents: ReleaseIntent[] = open.map((c) => ({
-    user,
+    user: c.user,
     commitmentId: c.id,
     epoch: c.epoch,
     deadline,

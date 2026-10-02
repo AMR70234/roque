@@ -16,7 +16,7 @@
 import { randomInt } from "node:crypto";
 import { encodeFunctionData, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { addresses, abis, eip712Domain, eip712Types } from "@roque/shared";
+import { addresses, abis, eip712Domain, eip712Types, tokenList } from "@roque/shared";
 import { agentSignerKey } from "./env.js";
 import { confirmTx, publicClient, sendRelayerTx } from "./chain.js";
 
@@ -282,6 +282,69 @@ export async function getCommitment(commitmentId: `0x${string}`): Promise<Commit
     functionName: "getCommitment",
     args: [commitmentId],
   })) as Commitment;
+}
+
+/** One token's two figures, as the executor holds them. */
+export interface VaultTokenState {
+  balance: bigint;
+  locked: bigint;
+  available: bigint;
+}
+
+/**
+ * Every token's balance and hold in one request.
+ *
+ * Twenty reads, batched through Multicall3 into a single round trip. The vault
+ * panel polls this every twenty seconds per connected wallet, and it was ten
+ * reads before holds existed; sending twenty separate calls at that cadence is
+ * how you get rate limited off a public RPC on a busy afternoon. A failed
+ * sub-call reads as zero rather than taking the whole snapshot down, which is
+ * the safe direction for a balance: under-reporting what is free refuses a
+ * withdrawal the person could have made, and the chain is the one that decides
+ * anyway.
+ */
+export async function vaultSnapshot(
+  user: `0x${string}`,
+): Promise<Map<string, VaultTokenState>> {
+  const owner = user.toLowerCase() as `0x${string}`;
+  const calls = tokenList.flatMap((t) => [
+    {
+      address: addresses.agentExecutor,
+      abi: abis.agentExecutor,
+      functionName: "vaultBalance",
+      args: [owner, t.address],
+    },
+    {
+      address: addresses.agentExecutor,
+      abi: abis.agentExecutor,
+      functionName: "lockedBalance",
+      args: [owner, t.address],
+    },
+  ]);
+  // The ABIs here are plain JSON rather than `as const`, so viem cannot infer
+  // the result shape of a built call list. The cast is named once, right where
+  // the answers are read back, instead of being spread across the reads.
+  const results = (await publicClient().multicall({
+    contracts: calls as never,
+    allowFailure: true,
+  })) as Array<{ status: "success" | "failure"; result?: unknown }>;
+
+  const read = (i: number): bigint => {
+    const r = results[i];
+    return r?.status === "success" ? (r.result as bigint) : 0n;
+  };
+
+  const snapshot = new Map<string, VaultTokenState>();
+  tokenList.forEach((t, i) => {
+    const balance = read(i * 2);
+    const locked = read(i * 2 + 1);
+    snapshot.set(t.symbol, {
+      balance,
+      locked,
+      available: balance > locked ? balance - locked : 0n,
+    });
+  });
+  return snapshot;
 }
 
 /** How much of a token the executor is holding for this user's commitments. */

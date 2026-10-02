@@ -41,7 +41,7 @@
 
 import { randomUUID } from "node:crypto";
 import { formatUnits, keccak256, parseUnits, stringToHex } from "viem";
-import { tokenBySymbol, tokenList, type TokenMeta } from "@roque/shared";
+import { tokenBySymbol, type TokenMeta } from "@roque/shared";
 import { q } from "./db/index.js";
 import {
   freshNonce,
@@ -49,6 +49,7 @@ import {
   lockedBalance,
   releaseCommitments,
   vaultBalance,
+  vaultSnapshot,
   type CommitIntent,
 } from "./intents.js";
 
@@ -297,8 +298,8 @@ export async function release(
  */
 export async function heldByToken(user: string): Promise<Map<string, TokenHold>> {
   const owner = user.toLowerCase() as `0x${string}`;
-  const [locks, rows] = await Promise.all([
-    Promise.all(tokenList.map(async (t) => [t.symbol, await lockedBalance(owner, t.address)] as const)),
+  const [snapshot, rows] = await Promise.all([
+    vaultSnapshot(owner),
     q<ReservationRow>(
       `SELECT token, amount_raw, percent FROM vault_reservations
         WHERE LOWER(user_address)=LOWER($1) AND status='held'`,
@@ -307,8 +308,10 @@ export async function heldByToken(user: string): Promise<Map<string, TokenHold>>
   ]);
 
   const held = new Map<string, TokenHold>();
-  for (const [symbol, raw] of locks) {
-    if (raw > 0n) held.set(symbol, { symbol, raw, percents: [], claims: 0 });
+  for (const [symbol, state] of snapshot) {
+    if (state.locked > 0n) {
+      held.set(symbol, { symbol, raw: state.locked, percents: [], claims: 0 });
+    }
   }
   for (const row of rows) {
     const entry = held.get(row.token);

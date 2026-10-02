@@ -10,7 +10,6 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { tokenByAddress } from "@roque/shared";
 import { reservationStore } from "./helpers/reservations.js";
 import type { PlaybookStep } from "../src/playbooks.js";
 
@@ -23,6 +22,7 @@ const state = vi.hoisted(() => ({
   executeVaultSwap: vi.fn(),
   vaultBalance: vi.fn(),
   lockedBalance: vi.fn(),
+  vaultSnapshot: vi.fn(),
   freshNonce: vi.fn(),
   lockCommitments: vi.fn(),
   releaseCommitments: vi.fn(),
@@ -35,6 +35,7 @@ vi.mock("../src/db/index.js", () => ({ q: state.q }));
 vi.mock("../src/intents.js", () => ({
   vaultBalance: state.vaultBalance,
   lockedBalance: state.lockedBalance,
+  vaultSnapshot: state.vaultSnapshot,
   freshNonce: state.freshNonce,
   lockCommitments: state.lockCommitments,
   releaseCommitments: state.releaseCommitments,
@@ -245,21 +246,6 @@ describe("armPlaybook", () => {
       0,
     );
 
-  /**
-   * Which tokens the vault was asked about, deduplicated. The assertion used to
-   * be a call count, which stopped meaning anything once taking a hold reads a
-   * balance of its own; what the tests actually care about is that a rung fed by
-   * an earlier rung is never costed against the vault.
-   */
-  const tokensRead = (): string[] => {
-    const seen = new Set<string>();
-    for (const call of state.vaultBalance.mock.calls) {
-      const token = tokenByAddress(String(call[1]));
-      if (token) seen.add(token.symbol);
-    }
-    return [...seen];
-  };
-
   beforeEach(() => {
     row = baseRow([absolute("100")], { status: "draft" });
   });
@@ -269,10 +255,11 @@ describe("armPlaybook", () => {
 
     expect(pb.status).toBe("armed");
     expect(pb.steps[0]!.armedAt).not.toBeNull();
-    expect(tokensRead()).toEqual(["rUSDC"]);
-    // The hold is the executor's, so arming is not finished until it lands.
+    // The hold is the executor's, so arming is not finished until it lands,
+    // and rUSDC is the only thing it holds.
     expect(state.lockCommitments).toHaveBeenCalledTimes(1);
     expect(held.lockedOf(user, "rUSDC")).toBe(100_000_000n);
+    expect([...held.locks.values()].map((l) => l.token)).toEqual(["rUSDC"]);
   });
 
   it("refuses to arm a plan the vault cannot pay for, and names the step", async () => {
@@ -316,10 +303,11 @@ describe("armPlaybook", () => {
     const pb = await armPlaybook("pb-1", user);
 
     expect(pb.status).toBe("armed");
-    // rUSDC only. Asking about rWETH at all would mean the ladder was being
-    // charged for money its own first rung creates.
-    expect(tokensRead()).toEqual(["rUSDC"]);
+    // rUSDC only. A hold on rWETH would mean the ladder was being charged for
+    // money its own first rung creates.
     expect(held.locks.size).toBe(1);
+    expect([...held.locks.values()].map((l) => l.token)).toEqual(["rUSDC"]);
+    expect(held.lockedOf(user, "rWETH")).toBe(0n);
   });
 
   it("checks the money before paying for a consensus round", async () => {

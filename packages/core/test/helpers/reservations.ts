@@ -21,7 +21,7 @@
  */
 
 import { keccak256, stringToHex } from "viem";
-import { tokenByAddress, tokenBySymbol } from "@roque/shared";
+import { tokenByAddress, tokenBySymbol, tokenList } from "@roque/shared";
 
 export interface ReservationRow {
   user_address: string;
@@ -60,6 +60,7 @@ interface MockFn {
 export interface IntentsMocks {
   vaultBalance: MockFn;
   lockedBalance?: MockFn;
+  vaultSnapshot?: MockFn;
   freshNonce?: MockFn;
   lockCommitments?: MockFn;
   releaseCommitments?: MockFn;
@@ -132,6 +133,21 @@ export function reservationStore(): ReservationStore {
       mocks.lockedBalance?.mockImplementation(async (user: string, address: string) => {
         const token = tokenByAddress(address);
         return token ? lockedOf(user, token.symbol) : 0n;
+      });
+      // The batched read, served off the same two models so it cannot disagree
+      // with the single reads beside it.
+      mocks.vaultSnapshot?.mockImplementation(async (user: string) => {
+        const out = new Map<string, { balance: bigint; locked: bigint; available: bigint }>();
+        for (const t of tokenList) {
+          const balance = await balanceOf(user, t.symbol);
+          const locked = lockedOf(user, t.symbol);
+          out.set(t.symbol, {
+            balance,
+            locked,
+            available: balance > locked ? balance - locked : 0n,
+          });
+        }
+        return out;
       });
       let nonce = 1n;
       mocks.freshNonce?.mockImplementation(async () => nonce++);

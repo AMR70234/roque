@@ -20,6 +20,7 @@ const state = vi.hoisted(() => ({
   q: vi.fn(),
   vaultBalance: vi.fn(),
   lockedBalance: vi.fn(),
+  vaultSnapshot: vi.fn(),
   freshNonce: vi.fn(),
   lockCommitments: vi.fn(),
   releaseCommitments: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("../src/db/index.js", () => ({ q: state.q }));
 vi.mock("../src/intents.js", () => ({
   vaultBalance: state.vaultBalance,
   lockedBalance: state.lockedBalance,
+  vaultSnapshot: state.vaultSnapshot,
   freshNonce: state.freshNonce,
   lockCommitments: state.lockCommitments,
   releaseCommitments: state.releaseCommitments,
@@ -39,7 +41,7 @@ vi.mock("../src/intents.js", () => ({
 const { reserve, release, heldByToken, availability, assertWithdrawable } = await import(
   "../src/reservations.js"
 );
-const { assertVaultFunds } = await import("../src/funding.js");
+const { assertVaultFunds, vaultFundingNeeds } = await import("../src/funding.js");
 
 const user = "0x1111111111111111111111111111111111111111" as const;
 const other = "0x2222222222222222222222222222222222222222" as const;
@@ -459,5 +461,37 @@ describe("letting go without the table's help", () => {
     expect(state.releaseCommitments).toHaveBeenCalledTimes(1);
     // Every candidate id reads as inactive, so no transaction is sent.
     await expect(state.releaseCommitments.mock.results[0].value).resolves.toBeNull();
+  });
+});
+
+describe("what the vault is actually on the hook for", () => {
+  // The pure half of the funding gate, asserted directly. It used to be
+  // inferred from how many balance reads the gate made, which stopped meaning
+  // anything once those reads were batched into one multicall.
+  it("skips a leg whose input an earlier leg produces", () => {
+    const needs = vaultFundingNeeds([
+      { tokenIn: "rUSDC", tokenOut: "rWETH", amount: "100", where: "Step 1" },
+      { tokenIn: "rWETH", tokenOut: "rUSDC", amount: "1", where: "Step 2" },
+    ]);
+    expect(needs.map((n) => n.symbol)).toEqual(["rUSDC"]);
+    expect(needs[0]!.raw).toBe(USDC(100));
+  });
+
+  it("adds up two legs that each draw on the vault", () => {
+    const needs = vaultFundingNeeds([
+      { tokenIn: "rUSDC", tokenOut: "rWETH", amount: "100", where: "Step 1" },
+      { tokenIn: "rUSDC", tokenOut: "rWBTC", amount: "60", where: "Step 2" },
+    ]);
+    expect(needs).toHaveLength(1);
+    expect(needs[0]!.raw).toBe(USDC(160));
+    expect(needs[0]!.where).toEqual(["Step 1", "Step 2"]);
+  });
+
+  it("asks only for a non-zero balance when a leg spends a share", () => {
+    const needs = vaultFundingNeeds([
+      { tokenIn: "rUSDC", tokenOut: "rWETH", amount: "50", amountIsPercent: true, where: "This order" },
+    ]);
+    expect(needs[0]!.raw).toBe(0n);
+    expect(needs[0]!.needsSome).toBe(true);
   });
 });

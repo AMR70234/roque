@@ -26,6 +26,7 @@ import {
   submitGrant,
   getCapability,
   vaultBalance,
+  vaultSnapshot,
   remainingDailyUsd,
   grantNonce,
   agentSignerAddress,
@@ -353,36 +354,29 @@ export async function handleCapability(userRaw: string) {
 
 export async function handleVault(userRaw: string) {
   const user = parse(address, userRaw);
-  // Read every token's vaulted balance in parallel and return two symbol-keyed
-  // maps: human units for display, raw strings for exact math on the client.
+  // Every token's balance and hold in one multicall, and the open claims in one
+  // query, so the panel can say "600 of 1,000 free" instead of quietly offering
+  // money the chain will refuse to move.
   //
-  // The held and available maps go with them, because a vault balance on its
-  // own is a misleading number once orders can rest for a fortnight: part of it
-  // is already promised to something that has not fired. Sending all three lets
-  // the panel say "600 of 1,000 free" instead of quietly offering money the
-  // chain will refuse to move. Held comes from the executor's own lockedBalance,
-  // so the figure on screen is the one a withdrawal will actually be measured
-  // against rather than an app-side guess at it.
-  const [raws, held] = await Promise.all([
-    Promise.all(tokenList.map((t) => vaultBalance(user, t.address))),
-    heldByToken(user),
-  ]);
+  // Held is the executor's own lockedBalance, so the figure on screen is the
+  // one a withdrawal is actually measured against rather than an app-side guess
+  // at it. Claims come from the reservations table and are only an explanation:
+  // they say which orders are behind a number, and a missing row makes the
+  // sentence vaguer without ever making the number wrong.
+  const [snapshot, held] = await Promise.all([vaultSnapshot(user), heldByToken(user)]);
   const balances: Record<string, string> = {};
   const raw: Record<string, string> = {};
   const heldRaw: Record<string, string> = {};
   const availableRaw: Record<string, string> = {};
   const claims: Record<string, number> = {};
-  tokenList.forEach((t, i) => {
-    const balance = raws[i];
-    const hold = held.get(t.symbol)?.raw ?? 0n;
-    // Floored at zero, the same way the executor floors availableBalance.
-    const free = balance > hold ? balance - hold : 0n;
-    balances[t.symbol] = formatUnits(balance, t.decimals);
-    raw[t.symbol] = balance.toString();
-    heldRaw[t.symbol] = hold.toString();
-    availableRaw[t.symbol] = free.toString();
+  for (const t of tokenList) {
+    const state = snapshot.get(t.symbol) ?? { balance: 0n, locked: 0n, available: 0n };
+    balances[t.symbol] = formatUnits(state.balance, t.decimals);
+    raw[t.symbol] = state.balance.toString();
+    heldRaw[t.symbol] = state.locked.toString();
+    availableRaw[t.symbol] = state.available.toString();
     claims[t.symbol] = held.get(t.symbol)?.claims ?? 0;
-  });
+  }
   return { balances, raw, heldRaw, availableRaw, claims };
 }
 

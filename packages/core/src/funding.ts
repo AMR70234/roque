@@ -32,8 +32,7 @@
 
 import { formatUnits, parseUnits } from "viem";
 import { tokenBySymbol, type TokenMeta } from "@roque/shared";
-import { vaultBalance } from "./intents.js";
-import { heldByToken } from "./reservations.js";
+import { vaultSnapshot } from "./intents.js";
 
 /**
  * One trade's claim on the vault. `where` names it in the refusal: a standalone
@@ -156,25 +155,25 @@ export async function assertVaultFunds(
   // boundary: viem rejects a mixed-case address that is not a valid checksum,
   // and a funding gate that throws "invalid address" instead of a verdict is
   // worse than no gate.
+  //
+  // One snapshot rather than a read per needed token. It pulls every token
+  // whether or not this order touches them, which sounds wasteful and is not:
+  // the whole thing is a single multicall, so the alternative is several round
+  // trips to fetch less.
   const owner = user.toLowerCase() as `0x${string}`;
-  const [balances, held] = await Promise.all([
-    Promise.all(needs.map((n) => vaultBalance(owner, requireToken(n.symbol).address))),
-    heldByToken(owner),
-  ]);
+  const snapshot = await vaultSnapshot(owner);
 
   const problems: string[] = [];
-  needs.forEach((need, i) => {
+  for (const need of needs) {
     const token = requireToken(need.symbol);
+    const state = snapshot.get(token.symbol) ?? { balance: 0n, locked: 0n, available: 0n };
     // Money already promised to a resting order is not money this one can
-    // spend. Floored at zero, matching availableBalance in the executor, which
-    // floors for the same reason: a negative figure would read as a credit.
-    const hold = held.get(token.symbol)?.raw ?? 0n;
-    const balance = balances[i];
-    const free = balance > hold ? balance - hold : 0n;
-    if (free < need.raw || (need.needsSome && free === 0n)) {
-      problems.push(shortfall(need, free, token, hold));
+    // spend. The executor floors this the same way, for the same reason: a
+    // negative figure would read as a credit.
+    if (state.available < need.raw || (need.needsSome && state.available === 0n)) {
+      problems.push(shortfall(need, state.available, token, state.locked));
     }
-  });
+  }
 
   if (problems.length > 0) throw new Error(problems.join(" · "));
 }

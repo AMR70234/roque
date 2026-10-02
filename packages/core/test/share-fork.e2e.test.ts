@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   q: vi.fn(),
   vaultBalance: vi.fn(),
   lockedBalance: vi.fn(),
+  vaultSnapshot: vi.fn(),
   freshNonce: vi.fn(),
   lockCommitments: vi.fn(),
   releaseCommitments: vi.fn(),
@@ -36,6 +37,7 @@ vi.mock("../src/services.js", () => ({
 vi.mock("../src/intents.js", () => ({
   vaultBalance: state.vaultBalance,
   lockedBalance: state.lockedBalance,
+  vaultSnapshot: state.vaultSnapshot,
   freshNonce: state.freshNonce,
   lockCommitments: state.lockCommitments,
   releaseCommitments: state.releaseCommitments,

@@ -19,6 +19,7 @@ const state = vi.hoisted(() => ({
   executeVaultSwap: vi.fn(),
   vaultBalance: vi.fn(),
   lockedBalance: vi.fn(),
+  vaultSnapshot: vi.fn(),
   freshNonce: vi.fn(),
   lockCommitments: vi.fn(),
   releaseCommitments: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../src/db/index.js", () => ({ q: state.q }));
 vi.mock("../src/intents.js", () => ({
   vaultBalance: state.vaultBalance,
   lockedBalance: state.lockedBalance,
+  vaultSnapshot: state.vaultSnapshot,
   freshNonce: state.freshNonce,
   lockCommitments: state.lockCommitments,
   releaseCommitments: state.releaseCommitments,
@@ -305,7 +307,11 @@ describe("createEventOrder", () => {
 
     expect(order.status).toBe("screening");
     expect(order.amount).toBe("100");
-    expect(state.vaultBalance).toHaveBeenCalledTimes(1);
+    // The vault was consulted. Not a call count: the gate reads every token in
+    // one multicall, so counting calls would be measuring the batch rather than
+    // the rule. What is costed is asserted in vault-reservations.test.ts,
+    // against vaultFundingNeeds, which is pure.
+    expect(state.vaultSnapshot).toHaveBeenCalled();
   });
 
   it("refuses an order the vault cannot pay for, and says by how much", async () => {

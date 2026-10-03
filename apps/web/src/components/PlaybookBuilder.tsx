@@ -30,7 +30,7 @@ import { Plus, Trash2, Rocket, ListOrdered } from "lucide-react";
 import { tokenList } from "@roque/shared";
 import { useAppData } from "@/providers/AppData";
 import { useToast } from "./Toaster";
-import { api } from "@/lib/api";
+import { api, StillWorkingError } from "@/lib/api";
 import { vaultShortfall } from "@/lib/funding";
 import type { Playbook, PlaybookStep, PlaybookTrigger } from "@/lib/types";
 
@@ -241,10 +241,20 @@ export function PlaybookBuilder({
       onCreated();
       toast.success("Playbook saved as a draft", "Arm it when you want the keeper walking it.");
     } catch (err) {
-      toast.error(
-        editing ? "Could not save those changes" : "Could not save that playbook",
-        (err as Error).message,
-      );
+      if (err instanceof StillWorkingError) {
+        // Saving a draft is one statement, so this is the platform having a
+        // moment rather than slow work -- but it may have landed, and saying it
+        // failed invites a second copy. The form keeps what was typed either way.
+        toast.info(
+          "Not sure that saved",
+          "The request outlasted its function. Check the list below before saving again, in case the change is already there.",
+        );
+      } else {
+        toast.error(
+          editing ? "Could not save those changes" : "Could not save that playbook",
+          (err as Error).message,
+        );
+      }
     } finally {
       setBusy(false);
     }

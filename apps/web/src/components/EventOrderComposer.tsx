@@ -19,7 +19,7 @@ import { Sparkles, Wand2 } from "lucide-react";
 import { tokenList } from "@roque/shared";
 import { useAppData } from "@/providers/AppData";
 import { useToast } from "./Toaster";
-import { api } from "@/lib/api";
+import { api, StillWorkingError } from "@/lib/api";
 import { vaultShortfall } from "@/lib/funding";
 import type { EventOrder } from "@/lib/types";
 
@@ -66,7 +66,18 @@ export function EventOrderComposer({ onCreated }: { onCreated: (order: EventOrde
       onCreated(res.order);
       toast.success("Written down", "Now screen it, so we know the validators can check it.");
     } catch (err) {
-      toast.error("Could not write that order", (err as Error).message);
+      if (err instanceof StillWorkingError) {
+        // Writing an order is a single insert, so this is the platform having a
+        // moment rather than slow work. The row may well have landed all the
+        // same, and calling it a failure is how you get two of them. The text
+        // is left in the box on purpose, in case it did not.
+        toast.info(
+          "Not sure that landed",
+          "The request outlasted its function. Check the list below before writing it again, in case the order is already there.",
+        );
+      } else {
+        toast.error("Could not write that order", (err as Error).message);
+      }
     } finally {
       setBusy(false);
     }

@@ -12,7 +12,7 @@ import { useState } from "react";
 import { ListOrdered, RefreshCw } from "lucide-react";
 import { useAppData } from "@/providers/AppData";
 import type { Playbook } from "@/lib/types";
-import { api } from "@/lib/api";
+import { api, StillWorkingError } from "@/lib/api";
 import { useToast } from "@/components/Toaster";
 import { PrivateGate } from "@/components/PrivateGate";
 import { VaultFundedNotice } from "@/components/VaultFundedNotice";
@@ -40,9 +40,81 @@ export default function PlaybooksPage() {
 
   const live = address && sessionReady;
 
+  /**
+   * How long to wait on an arming that outlived its request, and how often to
+   * look. Arming screens every event step at 23-68s a consensus round and then
+   * writes the on-chain holds, so a plan with two event steps genuinely takes
+   * minutes. There is no worker behind this to finish the job, which is why the
+   * window is generous: it is the only thing watching.
+   */
+  const ARM_WATCH_MS = 6 * 60 * 1000;
+  const ARM_POLL_MS = 5_000;
+
+  /** What arming settled on, once the plan says. Null if the window elapsed. */
+  const awaitArm = async (id: string, priorError: string | null): Promise<Playbook | null> => {
+    const deadline = Date.now() + ARM_WATCH_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, ARM_POLL_MS));
+      if (!address) return null;
+      try {
+        const { client } = await wallet.getClient();
+        const { playbooks: rows } = await api.playbooks(address, client);
+        const row = rows.find((p) => p.id === id);
+        // A row missing from one response is not an answer. Wait for the next.
+        if (!row) continue;
+        if (row.status === "armed") return row;
+        // A refusal leaves its reason on the plan: the unverifiable step, or the
+        // contract's own words after a hold was rolled back. `priorError` is
+        // what the row already carried when the button was pressed, so a stale
+        // reason is never read as this attempt's answer.
+        if (row.error && row.error !== priorError) return row;
+      } catch {
+        // A poll that fails is not news. The next one is five seconds away.
+      }
+    }
+    return null;
+  };
+
+  /**
+   * Report what arming did by asking the plan, not the request.
+   *
+   * This is the flow the long cap was raised for: every event step is a
+   * consensus round and the holds are a transaction after them, so arming is the
+   * most likely call in the app to outlive its own function. Reporting that as
+   * "It would not arm" was wrong twice over, because the status moves to 'armed'
+   * before the holds are written, so a request that died mid-flight could say it
+   * had failed while the money was being set aside against the rungs.
+   */
+  const watchArm = async (id: string, priorError: string | null): Promise<void> => {
+    const row = await awaitArm(id, priorError);
+    books.refresh();
+    // The holds move the vault's committed half, so the balance panels catch up
+    // now rather than on their next tick.
+    refreshAll();
+    if (row?.status === "armed") {
+      setEditingId((current) => (current === id ? null : current));
+      toast.success(
+        "Running",
+        "The keeper walks it from step one. Each rung's money is held in the vault until that rung trades.",
+      );
+      return;
+    }
+    if (row?.error) {
+      toast.error("It would not arm", row.error);
+      return;
+    }
+    toast.info(
+      "Still arming",
+      "Screening every step and writing the holds is taking longer than one request can stay open. It carries on without you, and the card updates itself the moment it settles.",
+    );
+  };
+
   const arm = async (id: string) => {
     if (!address) return;
     setBusy(id);
+    // Read before the press, so a reason left by an earlier attempt cannot be
+    // mistaken for this one's answer if the request outlives its function.
+    const priorError = books.data?.find((p) => p.id === id)?.error ?? null;
     const pending = toast.push({
       kind: "pending",
       title: "Arming the playbook",
@@ -62,9 +134,20 @@ export default function PlaybooksPage() {
       books.refresh();
     } catch (err) {
       toast.dismiss(pending);
-      // Arming refuses with the offending steps named, which is worth reading in full.
-      toast.error("It would not arm", (err as Error).message);
-      books.refresh();
+      if (err instanceof StillWorkingError) {
+        // Not a refusal. A round per event step plus the holds is simply more
+        // than one request can stay open for, so wait the work out.
+        toast.info(
+          "Still arming",
+          "A consensus round per step and then the holds outlasted the request. The work carries on without it, so this is a wait rather than a refusal.",
+        );
+        await watchArm(id, priorError);
+      } else {
+        // Arming refuses with the offending steps named, which is worth reading in full.
+        toast.error("It would not arm", (err as Error).message);
+        books.refresh();
+        refreshAll();
+      }
     } finally {
       setBusy(null);
     }
@@ -80,7 +163,19 @@ export default function PlaybooksPage() {
       books.refresh();
       refreshAll();
     } catch (err) {
-      toast.error("Could not stop it", (err as Error).message);
+      if (err instanceof StillWorkingError) {
+        // Same shape as an event order: the plan is stopped before the releases
+        // are sent, so this is the holds still being freed rather than a plan
+        // that is somehow still running.
+        toast.info(
+          "Stopped, freeing the money",
+          "No further steps will fire. Releasing the rungs' holds is a transaction and outlasted the request; the vault panel updates itself when it lands.",
+        );
+        books.refresh();
+        refreshAll();
+      } else {
+        toast.error("Could not stop it", (err as Error).message);
+      }
     } finally {
       setBusy(null);
     }

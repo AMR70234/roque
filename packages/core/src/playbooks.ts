@@ -493,12 +493,25 @@ export async function armPlaybook(id: string, user: string): Promise<Playbook> {
     try {
       await reserve(claims);
     } catch (err) {
+      // Same shape as an event order, deliberately. This path already released,
+      // but it did so after the row write and without guarding the release
+      // itself, so a release that threw replaced the reason the person needed
+      // with one about the cleanup.
+      let stranded = false;
+      try {
+        await release("playbook", id);
+      } catch {
+        stranded = true;
+      }
       await q(
         `UPDATE playbooks SET status='draft', error=$2, updated_at=now()
           WHERE id=$1 AND status='armed'`,
-        [id, `could not hold the vault money: ${(err as Error).message}`],
+        [
+          id,
+          `could not hold the vault money: ${(err as Error).message}` +
+            (stranded ? " Freeing what did land also failed, so some may still be held." : ""),
+        ],
       );
-      await release("playbook", id);
       throw err;
     }
   }

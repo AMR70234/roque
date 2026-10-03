@@ -563,10 +563,33 @@ export async function armEventOrder(id: string, user: string): Promise<EventOrde
       },
     ]);
   } catch (err) {
+    // The lock is written before the row that records it, so a failure in
+    // between leaves money held on-chain for something that is no longer armed.
+    // `release` derives its candidate ids from the source instead of reading a
+    // row, which is exactly this case, and an id that was never locked reads as
+    // inactive and is skipped. So it is safe whether the lock landed or not.
+    //
+    // Leaving this out is what stranded 150 rUSDC on 2026-10-03. The orphan then
+    // blocked re-arming, because the funding gate measures `available` off the
+    // chain and could not tell that the lock in its way belonged to the very
+    // order being armed.
+    let stranded = false;
+    try {
+      await release("event_order", id);
+    } catch {
+    // Freeing it failed too. The original reason is the more useful one to
+    // raise, so that is what is thrown, but the money really may still be held
+    // and the row is the only place the person would find that out.
+      stranded = true;
+    }
     await q(
       `UPDATE event_orders SET status='screened', error=$2, updated_at=now()
         WHERE id=$1 AND status='armed'`,
-      [id, `could not hold the vault money: ${(err as Error).message}`],
+      [
+        id,
+        `could not hold the vault money: ${(err as Error).message}` +
+          (stranded ? " Freeing what did land also failed, so some may still be held." : ""),
+      ],
     );
     throw err;
   }

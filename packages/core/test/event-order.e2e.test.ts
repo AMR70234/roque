@@ -58,6 +58,9 @@ const {
   armEventOrder,
   eventTick,
 } = await import("../src/events.js");
+// Unmocked on purpose: the derived id is the thing the release has to get right,
+// so a test that stubbed it would prove nothing.
+const { commitmentIdFor } = await import("../src/reservations.js");
 
 const user = "0x1111111111111111111111111111111111111111" as const;
 const CHECKABLE = "the Federal Reserve cuts its benchmark interest rate";
@@ -792,5 +795,56 @@ describe("arming when the hold cannot be taken", () => {
     await expect(armEventOrder("ev-1", user)).rejects.toThrow("CommittedVault");
     expect(row.status).toBe("screened");
     expect(row.error).toContain("could not hold the vault money");
+  });
+
+  it("frees a lock that landed before the row recording it could not be written", async () => {
+    // The case that actually happened, on 2026-10-03: the chain lock went
+    // through, the insert hit a column the live database did not have, and the
+    // rollback put the order back to 'screened' without letting the money go.
+    // 150 rUSDC stayed locked with nothing pointing at it, and because the
+    // funding gate measures `available` off the chain, re-arming the very order
+    // that owned the lock was refused for lack of funds.
+    //
+    // So this asserts the cleanup, not the refusal: the lock must be released.
+    row = baseRow({ status: "screened", screen_verdict: "verifiable" });
+    state.vaultBalance.mockResolvedValue(10_000_000_000n);
+    state.lockCommitments.mockResolvedValue(undefined);
+    const realQ = state.q.getMockImplementation()!;
+    state.q.mockImplementation(async (text: string, params?: unknown[]) => {
+      if (text.includes("INSERT INTO vault_reservations")) {
+        throw new Error(`column "commitment_id" of relation "vault_reservations" does not exist`);
+      }
+      return realQ(text, params);
+    });
+
+    await expect(armEventOrder("ev-1", user)).rejects.toThrow("commitment_id");
+
+    expect(state.lockCommitments).toHaveBeenCalled();
+    // The whole point. Without this the money is stranded.
+    expect(state.releaseCommitments).toHaveBeenCalledWith([
+      commitmentIdFor("event_order", "ev-1", 0),
+    ]);
+    expect(row.status).toBe("screened");
+    expect(row.error).toContain("could not hold the vault money");
+    // The release worked, so the message must not claim money is still held.
+    expect(row.error).not.toContain("may still be held");
+  });
+
+  it("says so on the row when freeing the lock fails as well", async () => {
+    // Then the person is told two things: why it would not arm, and that some of
+    // their balance may still be held. The thrown error stays the original one,
+    // because "the vault refused" is more use than "the cleanup refused".
+    row = baseRow({ status: "screened", screen_verdict: "verifiable" });
+    state.vaultBalance.mockResolvedValue(10_000_000_000n);
+    state.lockCommitments.mockResolvedValue(undefined);
+    state.releaseCommitments.mockRejectedValue(new Error("nonce too low"));
+    const realQ = state.q.getMockImplementation()!;
+    state.q.mockImplementation(async (text: string, params?: unknown[]) => {
+      if (text.includes("INSERT INTO vault_reservations")) throw new Error("insert blew up");
+      return realQ(text, params);
+    });
+
+    await expect(armEventOrder("ev-1", user)).rejects.toThrow("insert blew up");
+    expect(row.error).toContain("may still be held");
   });
 });

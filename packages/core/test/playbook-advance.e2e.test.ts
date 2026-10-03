@@ -61,7 +61,14 @@ vi.mock("../src/events.js", () => ({
   EVENT_CHECK_INTERVAL_MS: 10 * 60 * 1000,
 }));
 
-const { advancePlaybook, armPlaybook, normaliseStep, cancelPlaybook, playbookTick } = await import(
+const {
+  advancePlaybook,
+  armPlaybook,
+  updatePlaybook,
+  normaliseStep,
+  cancelPlaybook,
+  playbookTick,
+} = await import(
   "../src/playbooks.js"
 );
 
@@ -122,7 +129,17 @@ beforeEach(() => {
     sqls.push(text);
     const t = text.replace(/\s+/gu, " ").trim();
 
-    if (t.startsWith("SELECT * FROM playbooks")) return [{ ...row }];
+    if (t.startsWith("SELECT * FROM playbooks")) {
+      // Honour the owner filter when the statement carries one. Ownership is
+      // security-relevant, so a mock that answered regardless of who asked
+      // would make it untestable. advancePlaybook selects by id alone and so
+      // passes no second parameter.
+      if (t.includes("LOWER(user_address)=LOWER($2)")) {
+        const asked = String(params[1] ?? "").toLowerCase();
+        if (asked !== String(row.user_address).toLowerCase()) return [];
+      }
+      return [{ ...row }];
+    }
     // What cancelPlaybook reads back to tell "not yours" from "mid-trade".
     if (t.startsWith("SELECT status, steps, step_cursor FROM playbooks")) {
       const asked = String(params[1] ?? "").toLowerCase();
@@ -170,6 +187,19 @@ beforeEach(() => {
       if (!["draft", "armed"].includes(row.status as string)) return [];
       if ((row.steps[row.step_cursor]?.status as string) === "firing") return [];
       Object.assign(row, { status: "cancelled" });
+      return [{ ...row }];
+    }
+    // Editing a draft. Guarded on 'draft' in the statement, which is the whole
+    // protection: an armed plan has money held against named rungs.
+    if (t.includes("SET name=$2, note=$3, steps=$4::jsonb")) {
+      if (row.status !== "draft") return [];
+      Object.assign(row, {
+        name: params[1],
+        note: params[2],
+        steps: JSON.parse(String(params[3])) as PlaybookStep[],
+        slippage_bps: params[4],
+        error: null,
+      });
       return [{ ...row }];
     }
     // Arming rolled back because the chain would not take the hold.
@@ -647,5 +677,126 @@ describe("two workers reaching the same plan", () => {
 
     expect(row.status).toBe("failed");
     expect(state.executeVaultSwap).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Editing a draft.
+ *
+ * Nobody writes a ladder right first time, and before this the only way to
+ * change one was to cancel it and retype. The rule that matters is the one
+ * these mostly assert: a draft is free to change, and anything past a draft is
+ * not, because an armed plan has money held against named rungs and a cursor
+ * partway through them.
+ */
+describe("updatePlaybook", () => {
+  const absolute = (amount: string, tokenIn = "rUSDC", tokenOut = "rWETH") =>
+    normaliseStep(
+      {
+        trigger: { kind: "immediate" },
+        action: { tokenIn, tokenOut, amount, amountIsPercent: false },
+      },
+      0,
+    );
+
+  const stepPayload = (amount: string) => ({
+    trigger: { kind: "price", direction: "below", usd: 2500 },
+    action: { tokenIn: "rUSDC", tokenOut: "rWETH", amount, amountIsPercent: false },
+  });
+
+  beforeEach(() => {
+    row = baseRow([absolute("100")], { status: "draft", name: "Dip ladder" });
+    state.vaultBalance.mockResolvedValue(10_000_000_000n);
+  });
+
+  it("replaces the steps of a draft", async () => {
+    const pb = await updatePlaybook("pb-1", user, {
+      name: "Dip ladder, rethought",
+      steps: [stepPayload("40"), stepPayload("60")],
+    });
+    expect(pb.name).toBe("Dip ladder, rethought");
+    expect(pb.steps).toHaveLength(2);
+    expect(pb.steps[0]!.trigger).toEqual({ kind: "price", direction: "below", usd: 2500 });
+    expect(pb.steps.map((s) => s.action.amount)).toEqual(["40", "60"]);
+    expect(pb.status).toBe("draft");
+  });
+
+  it("leaves out fields the caller did not send", async () => {
+    const pb = await updatePlaybook("pb-1", user, { steps: [stepPayload("40")] });
+    expect(pb.name).toBe("Dip ladder");
+  });
+
+  it("re-normalises rather than trusting the shape it was handed", async () => {
+    await expect(
+      updatePlaybook("pb-1", user, {
+        steps: [{ trigger: { kind: "price", usd: -5 }, action: stepPayload("10").action }],
+      }),
+    ).rejects.toThrow("needs a price above zero");
+  });
+
+  it("refuses a step that trades a token for itself", async () => {
+    await expect(
+      updatePlaybook("pb-1", user, {
+        steps: [
+          {
+            trigger: { kind: "immediate" },
+            action: { tokenIn: "rUSDC", tokenOut: "rUSDC", amount: "10" },
+          },
+        ],
+      }),
+    ).rejects.toThrow("trades a token for itself");
+  });
+
+  it("clears a screen verdict a failed arming left behind", async () => {
+    // The sentence may have changed, and a stale verdict on new words is worse
+    // than none at all.
+    row.steps[0]!.screen = { verifiable: false, reason: "nobody could check it" };
+    const pb = await updatePlaybook("pb-1", user, { steps: [stepPayload("40")] });
+    expect(pb.steps[0]!.screen).toBeNull();
+    expect(pb.error).toBeNull();
+  });
+
+  it("will not touch an armed plan, and says why", async () => {
+    row = baseRow([absolute("100")], { status: "armed" });
+    await expect(
+      updatePlaybook("pb-1", user, { steps: [stepPayload("40")] }),
+    ).rejects.toThrow("already armed");
+  });
+
+  it("will not touch a finished plan", async () => {
+    row = baseRow([absolute("100")], { status: "completed" });
+    await expect(
+      updatePlaybook("pb-1", user, { steps: [stepPayload("40")] }),
+    ).rejects.toThrow("nothing left to edit");
+  });
+
+  it("is not somebody else's to edit", async () => {
+    await expect(
+      updatePlaybook("pb-1", "0x9999999999999999999999999999999999999999", {
+        steps: [stepPayload("40")],
+      }),
+    ).rejects.toThrow("No such playbook");
+    expect(row.steps.map((s) => s.action.amount)).toEqual(["100"]);
+  });
+
+  it("refuses an empty plan and an over-long one", async () => {
+    await expect(updatePlaybook("pb-1", user, { steps: [] })).rejects.toThrow(
+      "at least one step",
+    );
+    await expect(
+      updatePlaybook("pb-1", user, { steps: Array.from({ length: 11 }, () => stepPayload("1")) }),
+    ).rejects.toThrow("at most 10 steps");
+  });
+
+  it("refuses a blank name", async () => {
+    await expect(updatePlaybook("pb-1", user, { name: "   " })).rejects.toThrow(
+      "needs a name",
+    );
+  });
+
+  it("holds nothing, because a draft is still only a plan", async () => {
+    await updatePlaybook("pb-1", user, { steps: [stepPayload("40")] });
+    expect(state.lockCommitments).not.toHaveBeenCalled();
+    expect(held.held()).toHaveLength(0);
   });
 });

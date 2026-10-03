@@ -7,7 +7,12 @@ export const dynamic = "force-dynamic";
 // Screening, adjudicating and advancing all lean on GenLayer consensus, so this
 // is the longest-running route we have. The per-tick budgets in events.ts and
 // playbooks.ts exist to keep it inside this ceiling.
-export const maxDuration = 60;
+//
+// 60 was not a ceiling those budgets could ever fit inside. EVENT_TICK_BUDGET
+// is three rows and a round measures 23-68s, so a full pass needs minutes and
+// the platform was killing this one partway through its first or second row,
+// every time it ran. 300 is the Hobby maximum.
+export const maxDuration = 300;
 
 /**
  * The judgment tick: screen new event orders, ask the validators whether armed

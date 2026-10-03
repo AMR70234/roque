@@ -300,6 +300,84 @@ export async function createPlaybook(input: CreatePlaybookInput): Promise<Playbo
   return toPlaybook(rows[0]);
 }
 
+export interface UpdatePlaybookInput {
+  name?: string;
+  note?: string | null;
+  steps?: unknown[];
+  slippageBps?: number;
+}
+
+/**
+ * Change a draft before it goes anywhere.
+ *
+ * A plan is written in one sitting and almost never right first time: a rung in
+ * the wrong order, a size that turns out to be more than the vault holds, a
+ * condition the screen refused and that the person wants to reword rather than
+ * throw away. Until now the only way to do any of that was to cancel the plan
+ * and retype it, which also lost the sharing slug and the step ids.
+ *
+ * Draft only, and the guard is in the statement rather than in a check above it.
+ * An armed plan has money held against named rungs and a cursor partway through
+ * them; editing that is not an edit, it is a different plan, and the honest
+ * answer is to cancel and write one. A completed or cancelled plan is history.
+ *
+ * Steps are re-normalised rather than merged, so an edit cannot smuggle in a
+ * shape `normaliseStep` would have refused. That also clears any `screen`
+ * verdict a failed arming left on a step, which is correct: the sentence may
+ * have changed, and a stale verdict on new words is worse than none.
+ */
+export async function updatePlaybook(
+  id: string,
+  user: string,
+  input: UpdatePlaybookInput,
+): Promise<Playbook> {
+  const rows = await q<PlaybookRow>(
+    `SELECT * FROM playbooks WHERE id=$1 AND LOWER(user_address)=LOWER($2)`,
+    [id, user],
+  );
+  const row = rows[0];
+  if (!row) throw new Error("No such playbook.");
+  if (row.status !== "draft") {
+    throw new Error(
+      row.status === "armed"
+        ? "That playbook is already armed, and its money is held against the steps as they stand. Cancel it to edit, or let it run."
+        : `That playbook is ${row.status}, so there is nothing left to edit.`,
+    );
+  }
+
+  const name = input.name === undefined ? row.name : input.name.trim();
+  if (!name) throw new Error("A playbook needs a name.");
+  if (name.length > 120) throw new Error("Keep the name under 120 characters.");
+
+  let steps = row.steps;
+  if (input.steps !== undefined) {
+    if (!Array.isArray(input.steps) || input.steps.length === 0) {
+      throw new Error("A playbook needs at least one step.");
+    }
+    if (input.steps.length > MAX_STEPS) {
+      throw new Error(`A playbook can hold at most ${MAX_STEPS} steps.`);
+    }
+    steps = input.steps.map(normaliseStep);
+  }
+
+  const note =
+    input.note === undefined ? row.note : (input.note?.trim() || null);
+  const slippage =
+    input.slippageBps === undefined
+      ? row.slippage_bps
+      : Math.min(Math.max(input.slippageBps, 1), 5_000);
+
+  const saved = await q<PlaybookRow>(
+    `UPDATE playbooks
+        SET name=$2, note=$3, steps=$4::jsonb, slippage_bps=$5, error=NULL, updated_at=now()
+      WHERE id=$1 AND status='draft' RETURNING *`,
+    [id, name, note, JSON.stringify(steps), slippage],
+  );
+  if (!saved[0]) throw new Error("That playbook stopped being a draft while you were editing it.");
+  await log(id, 0, "edited", `${steps.length} step${steps.length === 1 ? "" : "s"}`);
+  return toPlaybook(saved[0]);
+}
+
 /**
  * Arm a draft. Every event trigger is screened for verifiability first, on the
  * same principle as a standalone event order: a plan whose second step waits on

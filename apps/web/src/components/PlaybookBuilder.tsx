@@ -15,16 +15,24 @@
  * cannot do is arm, and it is better to learn that while the size is still in
  * front of you. The ladder's own output counts: a rung that sells what the rung
  * above it bought is funded by the plan, not by the vault.
+ *
+ * The same form edits a draft, because nobody writes a ladder right first time:
+ * a rung in the wrong order, a size larger than the vault turns out to hold, a
+ * condition the screen refused and that is worth rewording rather than
+ * abandoning. Before this the only way to change any of that was to cancel the
+ * plan and retype it. Drafts only. An armed plan has money held against named
+ * rungs and a cursor partway through them, and rewriting that is not an edit,
+ * it is a different plan.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2, Rocket, ListOrdered } from "lucide-react";
 import { tokenList } from "@roque/shared";
 import { useAppData } from "@/providers/AppData";
 import { useToast } from "./Toaster";
-import { api } from "@/lib/api";
+import { api, StillWorkingError } from "@/lib/api";
 import { vaultShortfall } from "@/lib/funding";
-import type { PlaybookTrigger } from "@/lib/types";
+import type { Playbook, PlaybookStep, PlaybookTrigger } from "@/lib/types";
 
 type Draft = {
   triggerKind: PlaybookTrigger["kind"];
@@ -82,13 +90,76 @@ function describe(d: Draft): string {
   }
 }
 
-export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
+/**
+ * A stored step, back in the shape the form edits.
+ *
+ * The fields a trigger does not use keep their defaults rather than being left
+ * empty, so switching a step from a price trigger to a delay finds a sensible
+ * number already in the box instead of a blank that reads as invalid.
+ */
+function toDraft(step: PlaybookStep): Draft {
+  const base = blank();
+  const t = step.trigger;
+  const common = {
+    tokenIn: step.action.tokenIn,
+    tokenOut: step.action.tokenOut,
+    amount: step.action.amount,
+    isPercent: Boolean(step.action.amountIsPercent),
+  };
+  switch (t.kind) {
+    case "price":
+      return { ...base, ...common, triggerKind: "price", direction: t.direction, usd: String(t.usd) };
+    case "event":
+      return { ...base, ...common, triggerKind: "event", condition: t.condition };
+    case "delay":
+      return { ...base, ...common, triggerKind: "delay", minutes: String(t.minutes) };
+    default:
+      return { ...base, ...common, triggerKind: "immediate" };
+  }
+}
+
+export function PlaybookBuilder({
+  onCreated,
+  editing,
+  onCancelEdit,
+}: {
+  onCreated: () => void;
+  /** The draft being edited, or null when writing a new one. */
+  editing?: Playbook | null;
+  onCancelEdit?: () => void;
+}) {
   const { address, wallet, slippageBps, vault } = useAppData();
   const toast = useToast();
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [steps, setSteps] = useState<Draft[]>([blank()]);
   const [busy, setBusy] = useState(false);
+
+  // Keyed on the id rather than on the object, so the shared poll handing back
+  // an equal-but-new Playbook every twenty seconds does not wipe out whatever
+  // the person is halfway through typing.
+  const loaded = useRef<string | null>(null);
+  useEffect(() => {
+    const id = editing?.id ?? null;
+    if (loaded.current === id) return;
+    loaded.current = id;
+    if (!editing) {
+      setName("");
+      setNote("");
+      setSteps([blank()]);
+      return;
+    }
+    setName(editing.name);
+    setNote(editing.note ?? "");
+    setSteps(editing.steps.length > 0 ? editing.steps.map(toDraft) : [blank()]);
+  }, [editing]);
+
+  const reset = () => {
+    loaded.current = null;
+    setName("");
+    setNote("");
+    setSteps([blank()]);
+  };
 
   const patch = (i: number, p: Partial<Draft>) =>
     setSteps((s) => s.map((step, idx) => (idx === i ? { ...step, ...p } : step)));
@@ -123,34 +194,67 @@ export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
   const submit = async () => {
     if (!address) return;
     setBusy(true);
+    // Step ids are not carried across an edit on purpose. They key the screening
+    // request sent to GenLayer, and a reworded condition reusing the id of the
+    // sentence it replaced would ask a fresh question under an old name.
+    const payload = steps.map((d) => ({
+      label: describe(d),
+      trigger: toTrigger(d),
+      action: {
+        tokenIn: d.tokenIn,
+        tokenOut: d.tokenOut,
+        amount: d.amount,
+        amountIsPercent: d.isPercent,
+      },
+    }));
     try {
       const { client } = await wallet.getClient();
+      if (editing) {
+        await api.updatePlaybook(
+          {
+            id: editing.id,
+            user: address,
+            name: name.trim(),
+            note: note.trim() || undefined,
+            slippageBps,
+            steps: payload,
+          },
+          client,
+        );
+        onCancelEdit?.();
+        reset();
+        onCreated();
+        toast.success("Draft updated", "Still a draft, so nothing is held and nothing can fire.");
+        return;
+      }
       await api.createPlaybook(
         {
           user: address,
           name: name.trim(),
           note: note.trim() || undefined,
           slippageBps,
-          steps: steps.map((d) => ({
-            label: describe(d),
-            trigger: toTrigger(d),
-            action: {
-              tokenIn: d.tokenIn,
-              tokenOut: d.tokenOut,
-              amount: d.amount,
-              amountIsPercent: d.isPercent,
-            },
-          })),
+          steps: payload,
         },
         client,
       );
-      setName("");
-      setNote("");
-      setSteps([blank()]);
+      reset();
       onCreated();
       toast.success("Playbook saved as a draft", "Arm it when you want the keeper walking it.");
     } catch (err) {
-      toast.error("Could not save that playbook", (err as Error).message);
+      if (err instanceof StillWorkingError) {
+        // Saving a draft is one statement, so this is the platform having a
+        // moment rather than slow work -- but it may have landed, and saying it
+        // failed invites a second copy. The form keeps what was typed either way.
+        toast.info(
+          "Not sure that saved",
+          "The request outlasted its function. Check the list below before saving again, in case the change is already there.",
+        );
+      } else {
+        toast.error(
+          editing ? "Could not save those changes" : "Could not save that playbook",
+          (err as Error).message,
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -161,10 +265,11 @@ export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
       <header className="event-composer-head">
         <ListOrdered size={16} />
         <div>
-          <h2 className="panel-title">Write a playbook</h2>
+          <h2 className="panel-title">{editing ? "Edit this draft" : "Write a playbook"}</h2>
           <p className="event-composer-sub">
-            Steps run in order. The keeper will not look at a step until the one before it has
-            fired, so a ladder stays a ladder. Any event trigger gets screened when you arm it.
+            {editing
+              ? "Change anything while it is still a draft: reorder the rungs, resize them, reword a condition. Nothing is held and nothing can fire until you arm it."
+              : "Steps run in order. The keeper will not look at a step until the one before it has fired, so a ladder stays a ladder. Any event trigger gets screened when you arm it."}
           </p>
         </div>
       </header>
@@ -336,9 +441,22 @@ export function PlaybookBuilder({ onCreated }: { onCreated: () => void }) {
             {shortfall} It saves as a draft, but it cannot be armed until then.
           </span>
         ) : null}
+        {editing ? (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              onCancelEdit?.();
+              reset();
+            }}
+            disabled={busy}
+          >
+            Discard changes
+          </button>
+        ) : null}
         <button className="btn btn-primary" onClick={() => void submit()} disabled={busy || !ready}>
           {busy ? <span className="spinner" /> : <Rocket size={15} />}
-          Save the playbook
+          {editing ? "Save changes" : "Save the playbook"}
         </button>
       </div>
     </section>

@@ -34,6 +34,7 @@ import {
   handleEventOrders,
   handleCancelEventOrder,
   handleCreatePlaybook,
+  handleUpdatePlaybook,
   handleArmPlaybook,
   handlePlaybooks,
   handlePlaybook,
@@ -129,6 +130,9 @@ app.get<{ Params: { user: string } }>("/events/:user", async (req) =>
 // ── Playbooks: a plan the keeper walks one step at a time ──────
 app.post("/playbooks", async (req) =>
   handleCreatePlaybook(req.body, bearerToken(req.headers.authorization)),
+);
+app.post("/playbooks/update", async (req) =>
+  handleUpdatePlaybook(req.body, bearerToken(req.headers.authorization)),
 );
 app.post("/playbooks/arm", async (req) =>
   handleArmPlaybook(req.body, bearerToken(req.headers.authorization)),

@@ -43,6 +43,7 @@ import {
 } from "./events.js";
 import {
   createPlaybook,
+  updatePlaybook,
   armPlaybook,
   listPlaybooks,
   getPlaybook,
@@ -585,6 +586,34 @@ export async function handleCreatePlaybook(body: unknown, sessionToken?: string)
   const owner = await requireAutonomousOwner(sessionToken, input.user);
   try {
     return { playbook: await createPlaybook({ ...input, user: owner }) };
+  } catch (err) {
+    throw new ApiError(400, (err as Error).message);
+  }
+}
+
+const updatePlaybookSchema = z.object({
+  id: z.string().uuid("That is not a playbook I recognise."),
+  name: z.string().min(1, "Give the playbook a name.").max(120).optional(),
+  note: z.string().max(500).optional(),
+  steps: z
+    .array(z.record(z.string(), z.unknown()))
+    .min(1, "A playbook needs at least one step.")
+    .max(10)
+    .optional(),
+  slippageBps: z.number().int().min(1).max(5_000).optional(),
+});
+
+/**
+ * Edit a draft. Owner-scoped like every other write here, and draft-scoped in
+ * the statement underneath, so an armed plan with money held against its rungs
+ * cannot be rewritten from under the hold.
+ */
+export async function handleUpdatePlaybook(body: unknown, sessionToken?: string) {
+  const input = parse(updatePlaybookSchema, body);
+  const owner = await requireAutonomousOwner(sessionToken);
+  try {
+    const { id, ...patch } = input;
+    return { playbook: await updatePlaybook(id, owner, patch) };
   } catch (err) {
     throw new ApiError(400, (err as Error).message);
   }
